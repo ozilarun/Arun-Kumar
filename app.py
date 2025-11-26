@@ -2,6 +2,7 @@ import streamlit as st
 import pdfplumber
 import json
 import pandas as pd
+from tabulate import tabulate
 
 from maybank import parse_transactions_maybank
 from public_bank import parse_transactions_pbb
@@ -119,42 +120,34 @@ if all_tx:
     json_data = json.dumps(all_tx, indent=4)
     st.download_button("Download JSON", json_data, file_name="transactions.json", mime="application/json")
 
-    # TXT Export (Pretty Table)
-    df_txt = df[["date", "description", "debit", "credit", "balance", "source_file"]]
 
-    w_date = 12
-    w_desc = 45
-    w_debit = 12
-    w_credit = 12
-    w_balance = 14
-    w_file = 20
+    # ====================================================================
+    #           NEW TABULATE EXPORT (MATCHES NOTEBOOK PERFECTLY)
+    # ====================================================================
 
-    header = (
-        f"{'DATE':<{w_date}} | "
-        f"{'DESCRIPTION':<{w_desc}} | "
-        f"{'DEBIT':>{w_debit}} | "
-        f"{'CREDIT':>{w_credit}} | "
-        f"{'BALANCE':>{w_balance}} | "
-        f"{'FILE':<{w_file}}"
+    df_txt = df[["date", "description", "debit", "credit", "balance", "page"]]
+
+    # Format numeric fields
+    df_txt["debit"] = df_txt["debit"].apply(lambda x: f"{x:,.2f}")
+    df_txt["credit"] = df_txt["credit"].apply(lambda x: f"{x:,.2f}")
+    df_txt["balance"] = df_txt["balance"].apply(lambda x: f"{x:,.2f}")
+
+    # Grid-style clean table
+    txt_data = tabulate(
+        df_txt.values,
+        headers=df_txt.columns,
+        tablefmt="grid",
+        stralign="left",
+        numalign="right"
     )
-    separator = "-" * len(header)
 
-    lines = [header, separator]
+    st.download_button(
+        "Download TXT",
+        txt_data,
+        file_name="transactions.txt",
+        mime="text/plain"
+    )
 
-    for _, row in df_txt.iterrows():
-        line = (
-            f"{row['date']:<{w_date}} | "
-            f"{str(row['description'])[:w_desc]:<{w_desc}} | "
-            f"{row['debit']:>{w_debit}.2f} | "
-            f"{row['credit']:>{w_credit}.2f} | "
-            f"{row['balance']:>{w_balance}.2f} | "
-            f"{row['source_file']:<{w_file}}"
-        )
-        lines.append(line)
-
-    txt_data = "\n".join(lines)
-
-    st.download_button("Download TXT", txt_data, file_name="transactions.txt", mime="text/plain")
 
 else:
     st.info("Upload one or more PDF files to begin.")
