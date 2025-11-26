@@ -1,35 +1,25 @@
 import streamlit as st
 import pdfplumber
-import pytesseract
-from PIL import Image
 import regex as re
-import json
-import os
-import io
+import pandas as pd
 from tabulate import tabulate
 
-# ==============================
-# TEMP DIRECTORY FOR OCR IMAGES
-# ==============================
-TEMP_DIR = "temp_ocr_images"
-os.makedirs(TEMP_DIR, exist_ok=True)
 
-# ==============================
-# OCR + TEXT EXTRACTION
-# ==============================
-def extract_text(page, page_num):
-    text = page.extract_text()
-    if text and text.strip() != "":
-        return text
-
-    img_path = f"{TEMP_DIR}/page_{page_num}.png"
-    page.to_image(resolution=300).save(img_path)
-    return pytesseract.image_to_string(Image.open(img_path))
+# ======================================================================
+# NUMERIC CLEANER
+# ======================================================================
+def num(x):
+    if not x or x.strip() == "":
+        return 0.0
+    x = x.replace(",", "")
+    if x.endswith("+"):
+        x = x[:-1]
+    return float(x)
 
 
-# ==============================
-# PREPROCESSOR FOR RHB TEXT (same as notebook)
-# ==============================
+# ======================================================================
+# RHB PREPROCESSOR
+# ======================================================================
 def preprocess_rhb_text(text):
     lines = text.split("\n")
     merged, buffer = [], ""
@@ -50,140 +40,92 @@ def preprocess_rhb_text(text):
     return "\n".join(merged)
 
 
-# ==============================
-# REGEX PATTERN (SAME AS YOUR NOTEBOOK)
-# ==============================
-txn_pattern = re.compile(
+# ======================================================================
+# FINAL RHB REGEX (with description)
+# ======================================================================
+txn_pattern_rhb = re.compile(
     r"""
     (?P<date>\d{2}-\d{2}-\d{4})
     \s+
-    (?P<branch>\d{3})?
-    \s*
-    (?P<description>[A-Z0-9 /&.\-]+?)
+    (?P<body>.*?)
     \s+
-    (?P<ref1>[A-Za-z0-9\/]*)?
+    (?P<dr>[0-9,]*\.\d{2})?
     \s*
-    (?P<ref2>[A-Za-z0-9\/]*)?
+    (?P<dr_flag>-)?
     \s*
-    (?P<sender>[A-Za-z0-9]{1,40})?
+    (?P<cr>[0-9,]*\.\d{2})?
     \s+
-    (?P<dr>(?:[0-9,]*\.\d{2}|(?:\.\d{2})))?
-    \s*
-    (-)?
-    \s*
-    (?P<cr>(?:[0-9,]*\.\d{2}|(?:\.\d{2})))?
-    \s+
-    (?P<bal>-?[0-9,]*\.\d{2}-?)
+    (?P<bal>-?[0-9,]*\.\d{2}[+-]?)
     """,
-    re.VERBOSE
+    re.VERBOSE | re.DOTALL
 )
 
 
-# ==============================
-# CLEAN NUMBER FUNCTION
-# ==============================
-def num(v):
-    if not v:
-        return 0.0
-    v = v.replace(",", "")
-    if v.startswith("."):
-        v = "0" + v
-    if v.endswith("-"):
-        return -float(v[:-1])
-    return float(v)
-
-
-# ==============================
-# PARSE TRANSACTIONS (same logic)
-# ==============================
-def parse_transactions(text, page_num):
-    text = preprocess_rhb_text(text)
-    txns = []
-
-    for m in txn_pattern.finditer(text):
-        dr = num(m.group("dr"))
-        cr = num(m.group("cr"))
-        bal = num(m.group("bal"))
-
-        txns.append({
-            "date": m.group("date"),
-            "branch": m.group("branch") or "",
-            "description": m.group("description"),
-            "ref1": m.group("ref1") or "",
-            "ref2": m.group("ref2") or "",
-            "sender_reference": m.group("sender") or "",
-            "debit": dr if dr != 0 else 0.0,
-            "credit": cr if cr != 0 else 0.0,
-            "balance": bal,
-            "page": page_num
-        })
-
-    return txns
-
-
-# ==============================
-# PROCESS PDF (same logic)
-# ==============================
-def process_rhb_pdf(file):
+# ======================================================================
+# PARSE RHB PDF
+# ======================================================================
+def parse_rhb_pdf(pdf_file):
     all_txns = []
-    with pdfplumber.open(file) as pdf:
+
+    with pdfplumber.open(pdf_file) as pdf:
         for page_num, page in enumerate(pdf.pages, start=1):
-            raw = extract_text(page, page_num)
-            processed = preprocess_rhb_text(raw)
-            txns = parse_transactions(processed, page_num)
-            all_txns.extend(txns)
+
+            txt = page.extract_text()
+            if not txt:
+                continue
+
+            txt = preprocess_rhb_text(txt)
+
+            for m in txn_pattern_rhb.finditer(txt):
+                all_txns.append({
+                    "Date": m.group("date"),
+                    "Description": m.group("body").strip(),
+                    "Debit": num(m.group("dr")),
+                    "Credit": num(m.group("cr")),
+                    "Balance": num(m.group("bal")),
+                    "Page": page_num
+                })
+
     return all_txns
 
 
-# ==============================
-# STREAMLIT UI
-# ==============================
-st.title("📄 RHB Bank Statement Parser (6 Months)")
-st.write("Upload 1–6 PDFs and extract all transactions into a table.")
+# ======================================================================
+# CONVERT TO TXT (TABULATED)
+# ======================================================================
+def df_to_txt(df):
+    return tabulate(df, headers="keys", tablefmt="grid")
 
-uploaded_files = st.file_uploader(
-    "Upload RHB PDF bank statements",
-    type=["pdf"],
-    accept_multiple_files=True
+
+# ======================================================================
+# STREAMLIT APP
+# ======================================================================
+st.set_page_config(page_title="RHB Statement Parser", layout="wide")
+
+st.title("📄 RHB Bank Statement Parser")
+st.write("Upload an RHB PDF bank statement and extract transactions into a clean TXT table.")
+
+uploaded_file = st.file_uploader("Upload RHB PDF", type=["pdf"])
+
+if not uploaded_file:
+    st.stop()
+
+transactions = parse_rhb_pdf(uploaded_file)
+
+if not transactions:
+    st.error("No transactions detected. Check PDF quality.")
+    st.stop()
+
+df = pd.DataFrame(transactions)
+
+# Show table
+st.subheader("Extracted Transactions")
+txt_table = df_to_txt(df)
+st.text(txt_table)
+
+# TXT export
+st.download_button(
+    label="⬇ Download TXT File",
+    data=txt_table,
+    file_name="RHB_Transactions.txt",
+    mime="text/plain"
 )
-
-if uploaded_files:
-    st.info(f"Processing {len(uploaded_files)} PDFs...")
-
-    all_transactions = []
-
-    for file in uploaded_files:
-        st.write(f"📘 Processing: **{file.name}**")
-        txns = process_rhb_pdf(file)
-        all_transactions.extend(txns)
-
-    st.success(f"✔ Extracted total {len(all_transactions)} transactions")
-
-    # Display Table in Streamlit
-    st.subheader("Extracted Transaction Table")
-
-    st.dataframe(all_transactions)
-
-    # Prepare tabulated text output
-    rows = []
-    for t in all_transactions:
-        rows.append([
-            t["date"],
-            t["description"],
-            f"{t['debit']:,.2f}",
-            f"{t['credit']:,.2f}",
-            f"{t['balance']:,.2f}",
-            t["page"]
-        ])
-
-    headers = ["Date", "Description", "Debit", "Credit", "Balance", "Page"]
-    table_text = tabulate(rows, headers=headers, tablefmt="grid")
-
-    # Download Button
-    st.download_button(
-        label="⬇ Download Transactions (TXT)",
-        data=table_text,
-        file_name="transaction_table.txt",
-        mime="text/plain"
-    )
-
