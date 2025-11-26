@@ -1,6 +1,6 @@
 streamlit
 pdfplumber
 pytesseract
-pillow
+Pillow
 regex
 tabulate
