@@ -120,26 +120,30 @@ def compute_monthly_summary(all_months, od_limit, bank_name):
 
     for month, df in all_months.items():
 
-       # determine earliest & latest transaction by DATE (not row order)
-df["_dt"] = pd.to_datetime(df["date"], dayfirst=True)
+        # ===============================
+        # CORRECT OPENING & ENDING LOGIC
+        # ===============================
+        df["_dt"] = pd.to_datetime(df["date"], dayfirst=True)
 
-earliest_txn = df.loc[df["_dt"].idxmin()]
-latest_txn   = df.loc[df["_dt"].idxmax()]
+        earliest_txn = df.loc[df["_dt"].idxmin()]
+        latest_txn = df.loc[df["_dt"].idxmax()]
 
-df.drop(columns="_dt", inplace=True)
+        df.drop(columns="_dt", inplace=True)
 
-if prev_ending is None:
-    opening = (
-        earliest_txn["balance"]
-        + earliest_txn["debit"]
-        - earliest_txn["credit"]
-    )
-else:
-    opening = prev_ending
+        if prev_ending is None:
+            opening = (
+                earliest_txn["balance"]
+                + earliest_txn["debit"]
+                - earliest_txn["credit"]
+            )
+        else:
+            opening = prev_ending
 
-ending = latest_txn["balance"]
+        ending = latest_txn["balance"]
 
-
+        # ===============================
+        # AGGREGATES
+        # ===============================
         debit = df["debit"].sum()
         credit = df["credit"].sum()
         highest = df["balance"].max()
