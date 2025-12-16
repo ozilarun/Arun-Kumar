@@ -50,7 +50,7 @@ if not uploaded_files:
     st.stop()
 
 # =====================================================
-# EXTRACTION
+# EXTRACTION (NO LOGIC CHANGE)
 # =====================================================
 extractor = BANK_EXTRACTORS[bank_choice]
 all_dfs = []
@@ -68,6 +68,9 @@ if not all_dfs:
     st.error("No transactions extracted.")
     st.stop()
 
+# =====================================================
+# COMBINE (KEEP ORIGINAL ORDER)
+# =====================================================
 df_all = pd.concat(all_dfs, ignore_index=True)
 
 st.subheader("📄 Cleaned Transaction List (Original Order)")
@@ -83,22 +86,18 @@ OD_LIMIT = st.number_input(
 )
 
 # =====================================================
-# HELPERS
+# MONTH SPLIT (CORRECT MONTH ORDER)
 # =====================================================
-def compute_opening_balance_from_row(row):
-    return row["balance"] + row["debit"] - row["credit"]
-
-
 def split_by_month(df):
     temp = df.copy()
     temp["_dt"] = pd.to_datetime(temp["date"], dayfirst=True)
 
     month_order = (
         temp.assign(m=temp["_dt"].dt.to_period("M"))
-        .groupby("m")["_dt"]
-        .min()
-        .sort_values()
-        .index
+            .groupby("m")["_dt"]
+            .min()
+            .sort_values()
+            .index
     )
 
     months = {}
@@ -112,31 +111,35 @@ def split_by_month(df):
 
     return months
 
-
+# =====================================================
+# MONTHLY SUMMARY (BANK-AWARE)
+# =====================================================
 def compute_monthly_summary(all_months, od_limit, bank_name):
     rows = []
     prev_ending = None
 
     for month, df in all_months.items():
 
-        # ===== OPENING & ENDING =====
         if bank_name == "CIMB":
-            # CIMB statements are in DESCENDING date order
-            earliest_txn = df.iloc[-1]   # earliest date (month start)
-            latest_txn = df.iloc[0]      # latest date (month end)
+            # CIMB = DESCENDING
+            if prev_ending is None:
+                last = df.iloc[-1]
+                opening = last["balance"] + last["debit"] - last["credit"]
+            else:
+                opening = prev_ending
+
+            ending = df.iloc[0]["balance"]
+
         else:
-            # Other banks are ASCENDING
-            earliest_txn = df.iloc[0]
-            latest_txn = df.iloc[-1]
+            # ALL OTHER BANKS = ASCENDING
+            if prev_ending is None:
+                first = df.iloc[0]
+                opening = first["balance"] + first["debit"] - first["credit"]
+            else:
+                opening = prev_ending
 
-        if prev_ending is None:
-            opening = compute_opening_balance_from_row(earliest_txn)
-        else:
-            opening = prev_ending
+            ending = df.iloc[-1]["balance"]
 
-        ending = latest_txn["balance"]
-
-        # ===== AGGREGATES =====
         debit = df["debit"].sum()
         credit = df["credit"].sum()
         highest = df["balance"].max()
@@ -167,27 +170,41 @@ def compute_monthly_summary(all_months, od_limit, bank_name):
 
     return pd.DataFrame(rows)
 
-
+# =====================================================
+# RATIOS
+# =====================================================
 def compute_ratios(summary, od_limit):
     df = summary.copy()
 
-    return pd.DataFrame([
-        ("Total Credit (6 Months)", df["Credit"].sum()),
-        ("Total Debit (6 Months)", df["Debit"].sum()),
-        ("Annualized Credit", df["Credit"].sum() * 2),
-        ("Annualized Debit", df["Debit"].sum() * 2),
-        ("Average Opening Balance", df["Opening"].mean()),
-        ("Average Ending Balance", df["Ending"].mean()),
-        ("Highest Balance (Period)", df["Highest"].max()),
-        ("Lowest Balance (Period)", df["Lowest"].min()),
-        ("Average OD Utilization (RM)", df["OD Util (RM)"].mean() if od_limit > 0 else 0),
-        ("Average % OD Utilization", df["OD %"].mean() if od_limit > 0 else 0),
-        ("Average Monthly Swing (RM)", df["Swing"].mean()),
-        ("% of Swing", (df["Swing"].mean() / od_limit * 100) if od_limit > 0 else 0),
-        ("Returned Cheques", 0),
-        ("Number of Excesses", int((df["OD Util (RM)"] > od_limit).sum()) if od_limit > 0 else 0)
-    ], columns=["Metric", "Value"])
+    if od_limit <= 0:
+        avg_od_util = 0
+        avg_od_pct = 0
+        num_excess = 0
+        pct_swing = 0
+    else:
+        avg_od_util = df["OD Util (RM)"].mean()
+        avg_od_pct = df["OD %"].mean()
+        num_excess = int((df["OD Util (RM)"] > od_limit).sum())
+        pct_swing = (df["Swing"].mean() / od_limit) * 100
 
+    ratio = {
+        "Total Credit (6 Months)": df["Credit"].sum(),
+        "Total Debit (6 Months)": df["Debit"].sum(),
+        "Annualized Credit": df["Credit"].sum() * 2,
+        "Annualized Debit": df["Debit"].sum() * 2,
+        "Average Opening Balance": df["Opening"].mean(),
+        "Average Ending Balance": df["Ending"].mean(),
+        "Highest Balance (Period)": df["Highest"].max(),
+        "Lowest Balance (Period)": df["Lowest"].min(),
+        "Average OD Utilization (RM)": avg_od_util,
+        "Average % OD Utilization": avg_od_pct,
+        "Average Monthly Swing (RM)": df["Swing"].mean(),
+        "% of Swing": pct_swing,
+        "Returned Cheques": 0,
+        "Number of Excesses": num_excess
+    }
+
+    return pd.DataFrame(list(ratio.items()), columns=["Metric", "Value"])
 
 # =====================================================
 # RUN ANALYSIS
@@ -196,12 +213,17 @@ if st.button("Run Analysis"):
 
     months = split_by_month(df_all)
 
-    st.subheader("📂 Monthly Breakdown (Audit)")
+    st.subheader("📂 Monthly Breakdown (Audit View)")
     for m, mdf in months.items():
         st.markdown(f"### {m}")
         st.dataframe(mdf, use_container_width=True)
 
-    monthly_summary = compute_monthly_summary(months, OD_LIMIT, bank_choice)
+    monthly_summary = compute_monthly_summary(
+        months,
+        OD_LIMIT,
+        bank_choice
+    )
+
     ratio_df = compute_ratios(monthly_summary, OD_LIMIT)
 
     st.subheader("📅 Monthly Summary")
