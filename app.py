@@ -1,12 +1,11 @@
 import streamlit as st
 import tempfile
 import pandas as pd
+from io import BytesIO
 
 from openpyxl import Workbook
 from openpyxl.styles import Font
 from openpyxl.utils.dataframe import dataframe_to_rows
-from io import BytesIO
-
 
 # =====================================================
 # BANK IMPORTS (DO NOT TOUCH)
@@ -16,6 +15,15 @@ from bank_islam import extract_bank_islam
 from cimb import extract_cimb
 from maybank import extract_maybank
 from rhb import extract_rhb
+
+# =====================================================
+# SESSION STATE INIT (MANDATORY)
+# =====================================================
+if "monthly_summary" not in st.session_state:
+    st.session_state.monthly_summary = None
+
+if "ratio_df" not in st.session_state:
+    st.session_state.ratio_df = None
 
 # =====================================================
 # PAGE SETUP
@@ -111,7 +119,7 @@ def split_by_month(df):
     return months
 
 # =====================================================
-# MONTHLY SUMMARY (CORRECT & BANK-GRADE)
+# MONTHLY SUMMARY (BANK-GRADE LOGIC)
 # =====================================================
 def compute_monthly_summary(all_months, od_limit):
     rows = []
@@ -119,7 +127,6 @@ def compute_monthly_summary(all_months, od_limit):
 
     for month, df in all_months.items():
 
-        # --- determine earliest & latest by DATE ---
         df["_dt"] = pd.to_datetime(df["date"], dayfirst=True)
 
         min_date = df["_dt"].min()
@@ -128,7 +135,7 @@ def compute_monthly_summary(all_months, od_limit):
         first_day_txns = df[df["_dt"] == min_date]
         last_day_txns = df[df["_dt"] == max_date]
 
-        # --- OPENING ---
+        # ---- OPENING ----
         if prev_ending is None:
             opening = (
                 first_day_txns["balance"]
@@ -138,12 +145,12 @@ def compute_monthly_summary(all_months, od_limit):
         else:
             opening = prev_ending
 
-        # --- ENDING ---
+        # ---- ENDING ----
         ending = last_day_txns["balance"].iloc[-1]
 
         df.drop(columns="_dt", inplace=True)
 
-        # --- AGGREGATES ---
+        # ---- AGGREGATES ----
         debit = df["debit"].sum()
         credit = df["credit"].sum()
         highest = df["balance"].max()
@@ -222,51 +229,62 @@ if st.button("Run Analysis"):
         st.markdown(f"### {m}")
         st.dataframe(mdf, use_container_width=True)
 
-    monthly_summary = compute_monthly_summary(months, OD_LIMIT)
-    ratio_df = compute_ratios(monthly_summary, OD_LIMIT)
-
-    st.subheader("📅 Monthly Summary")
-    st.dataframe(monthly_summary, use_container_width=True)
-
-    st.subheader("📊 Financial Ratios")
-    st.dataframe(ratio_df, use_container_width=True)
-
-if st.button("Export to Excel"):
-
-    wb = Workbook()
-    ws = wb.active
-    ws.title = "Monthly Summary"
-
-    # ---- Title ----
-    ws["A1"] = "Bank Statement Analysis"
-    ws["A1"].font = Font(bold=True)
-
-    # ---- Monthly Summary ----
-    for r_idx, row in enumerate(
-        dataframe_to_rows(monthly_summary, index=False, header=True),
-        start=3
-    ):
-        for c_idx, value in enumerate(row, start=1):
-            ws.cell(row=r_idx, column=c_idx, value=value)
-
-    # ---- Ratios Sheet ----
-    ws2 = wb.create_sheet("Ratios")
-    for r_idx, row in enumerate(
-        dataframe_to_rows(ratio_df, index=False, header=True),
-        start=1
-    ):
-        for c_idx, value in enumerate(row, start=1):
-            ws2.cell(row=r_idx, column=c_idx, value=value)
-
-    buffer = BytesIO()
-    wb.save(buffer)
-    buffer.seek(0)
-
-    st.download_button(
-        "Download Excel",
-        data=buffer,
-        file_name="Bank_Statement_Analysis.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    st.session_state.monthly_summary = compute_monthly_summary(months, OD_LIMIT)
+    st.session_state.ratio_df = compute_ratios(
+        st.session_state.monthly_summary,
+        OD_LIMIT
     )
 
+    st.subheader("📅 Monthly Summary")
+    st.dataframe(st.session_state.monthly_summary, use_container_width=True)
 
+    st.subheader("📊 Financial Ratios")
+    st.dataframe(st.session_state.ratio_df, use_container_width=True)
+
+# =====================================================
+# EXPORT TO EXCEL (FINAL & WORKING)
+# =====================================================
+if st.session_state.monthly_summary is not None:
+
+    if st.button("Export to Excel"):
+
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "Monthly Summary"
+
+        ws["A1"] = "Bank Statement Analysis"
+        ws["A1"].font = Font(bold=True)
+
+        for r_idx, row in enumerate(
+            dataframe_to_rows(
+                st.session_state.monthly_summary,
+                index=False,
+                header=True
+            ),
+            start=3
+        ):
+            for c_idx, value in enumerate(row, start=1):
+                ws.cell(row=r_idx, column=c_idx, value=value)
+
+        ws2 = wb.create_sheet("Ratios")
+        for r_idx, row in enumerate(
+            dataframe_to_rows(
+                st.session_state.ratio_df,
+                index=False,
+                header=True
+            ),
+            start=1
+        ):
+            for c_idx, value in enumerate(row, start=1):
+                ws2.cell(row=r_idx, column=c_idx, value=value)
+
+        buffer = BytesIO()
+        wb.save(buffer)
+        buffer.seek(0)
+
+        st.download_button(
+            "Download Excel",
+            data=buffer,
+            file_name="Bank_Statement_Analysis.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
