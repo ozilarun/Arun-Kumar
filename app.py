@@ -120,19 +120,22 @@ def compute_monthly_summary(all_months, od_limit, bank_name):
     for month, df in all_months.items():
 
         # ===== OPENING & ENDING =====
-        if bank_name == "CIMB":
-            first_txn = df.iloc[-1]      # earliest date
-            last_txn = df.iloc[0]        # latest date
+               if bank_name == "CIMB":
+            # CIMB statements are in DESCENDING date order
+            earliest_txn = df.iloc[-1]   # earliest date (month start)
+            latest_txn = df.iloc[0]      # latest date (month end)
         else:
-            first_txn = df.iloc[0]
-            last_txn = df.iloc[-1]
+            # Other banks are ASCENDING
+            earliest_txn = df.iloc[0]
+            latest_txn = df.iloc[-1]
 
         if prev_ending is None:
-            opening = compute_opening_balance_from_row(first_txn)
+            opening = compute_opening_balance_from_row(earliest_txn)
         else:
             opening = prev_ending
 
-        ending = last_txn["balance"]
+        ending = latest_txn["balance"]
+
 
         # ===== AGGREGATES =====
         debit = df["debit"].sum()
