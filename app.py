@@ -113,8 +113,9 @@ def compute_monthly_summary(all_months, od_limit, bank_name):
     prev_ending = None
     
     for month, df in all_months.items():
-        # Convert dates to datetime for proper comparison
+        # Add row index to preserve original order
         df_temp = df.copy()
+        df_temp["_original_idx"] = range(len(df_temp))
         df_temp["_dt"] = pd.to_datetime(df_temp["date"], dayfirst=True)
         
         # Find the earliest date (start of month)
@@ -123,15 +124,22 @@ def compute_monthly_summary(all_months, od_limit, bank_name):
         max_date = df_temp["_dt"].max()
         
         # Get all transactions on the earliest date
-        first_date_txns = df_temp[df_temp["_dt"] == min_date]
+        first_date_txns = df_temp[df_temp["_dt"] == min_date].copy()
         # Get all transactions on the latest date
-        last_date_txns = df_temp[df_temp["_dt"] == max_date]
+        last_date_txns = df_temp[df_temp["_dt"] == max_date].copy()
         
-        # For earliest date: use FIRST transaction of that day
-        first_txn = first_date_txns.iloc[0]
-        
-        # For latest date: use LAST transaction of that day
-        last_txn = last_date_txns.iloc[-1]
+        if bank_name == "CIMB":
+            # CIMB is in descending order (latest dates first)
+            # For earliest date: use the LAST occurrence (highest original index)
+            first_txn = first_date_txns.loc[first_date_txns["_original_idx"].idxmax()]
+            # For latest date: use the FIRST occurrence (lowest original index)
+            last_txn = last_date_txns.loc[last_date_txns["_original_idx"].idxmin()]
+        else:
+            # Other banks are in ascending order (earliest dates first)
+            # For earliest date: use the FIRST occurrence (lowest original index)
+            first_txn = first_date_txns.loc[first_date_txns["_original_idx"].idxmin()]
+            # For latest date: use the LAST occurrence (highest original index)
+            last_txn = last_date_txns.loc[last_date_txns["_original_idx"].idxmax()]
         
         # Calculate opening balance
         if prev_ending is None:
