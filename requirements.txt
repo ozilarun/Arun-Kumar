@@ -4,3 +4,6 @@ pytesseract
 Pillow
 regex
 tabulate
+pandas
+openpyxl
+
