@@ -69,7 +69,7 @@ if not all_dfs:
     st.stop()
 
 # =====================================================
-# COMBINE (❌ NO SORTING, NO DATETIME OVERWRITE)
+# COMBINE (DO NOT SORT, DO NOT MODIFY DATE)
 # =====================================================
 df_all = pd.concat(all_dfs, ignore_index=True)
 
@@ -86,22 +86,35 @@ OD_LIMIT = st.number_input(
 )
 
 # =====================================================
-# HELPER FUNCTIONS (NOTEBOOK-CORRECT)
+# HELPER FUNCTIONS (MATCH NOTEBOOK EXACTLY)
 # =====================================================
 def compute_opening_balance(df):
     first = df.iloc[0]
     return first["balance"] + first["debit"] - first["credit"]
 
 
-# 🔧 FIX: Month split WITHOUT reordering rows
+# ✅ MONTH SPLIT — CORRECT MONTH ORDER, ROW ORDER PRESERVED
 def split_by_month(df):
     temp = df.copy()
-    temp["_month"] = pd.to_datetime(temp["date"], dayfirst=True).dt.to_period("M")
+    temp["_dt"] = pd.to_datetime(temp["date"], dayfirst=True)
+
+    # Determine month order by FIRST transaction date per month
+    month_order = (
+        temp.assign(m=temp["_dt"].dt.to_period("M"))
+            .groupby("m")["_dt"]
+            .min()
+            .sort_values()
+            .index
+    )
 
     months = {}
-    for m in temp["_month"].unique():   # preserves appearance order
+    for m in month_order:
         label = m.strftime("%b %Y")
-        months[label] = temp[temp["_month"] == m].drop(columns="_month").reset_index(drop=True)
+        months[label] = (
+            temp[temp["_dt"].dt.to_period("M") == m]
+            .drop(columns="_dt")
+            .reset_index(drop=True)
+        )
 
     return months
 
@@ -112,7 +125,7 @@ def compute_monthly_summary(all_months, od_limit):
 
     for month, df in all_months.items():
 
-        # 🔒 OPENING BALANCE (ROLL FORWARD)
+        # 🔒 OPENING BALANCE — NOTEBOOK LOGIC
         if prev_ending is None:
             opening = compute_opening_balance(df)
         else:
@@ -122,11 +135,11 @@ def compute_monthly_summary(all_months, od_limit):
 
         debit = df["debit"].sum()
         credit = df["credit"].sum()
-
         highest = df["balance"].max()
         lowest = df["balance"].min()
         swing = abs(highest - lowest)
 
+        # 🔒 OD RULE
         if od_limit > 0:
             od_util = abs(ending) if ending < 0 else 0
             od_pct = (od_util / od_limit) * 100
@@ -186,7 +199,7 @@ def compute_ratios(summary, od_limit):
     return pd.DataFrame(list(ratio.items()), columns=["Metric", "Value"])
 
 # =====================================================
-# EXCEL EXPORT – ONE SHEET
+# EXCEL EXPORT – ONE SHEET (NOTEBOOK STYLE)
 # =====================================================
 def export_analysis_excel(monthly_df, ratio_df, output_path):
     wb = Workbook()
@@ -244,8 +257,10 @@ if st.button("Run Analysis"):
 
     st.subheader("📂 Monthly Breakdown (Audit View)")
     for m, mdf in months.items():
+        audit_df = mdf.copy()
+        audit_df["date"] = audit_df["date"].astype(str)
         st.markdown(f"### {m}")
-        st.dataframe(mdf, use_container_width=True)
+        st.dataframe(audit_df, use_container_width=True)
 
     monthly_summary = compute_monthly_summary(months, OD_LIMIT)
     ratio_df = compute_ratios(monthly_summary, OD_LIMIT)
