@@ -17,7 +17,7 @@ from maybank import extract_maybank
 from rhb import extract_rhb
 
 # =====================================================
-# SESSION STATE INIT (MANDATORY)
+# SESSION STATE INIT
 # =====================================================
 if "monthly_summary" not in st.session_state:
     st.session_state.monthly_summary = None
@@ -119,7 +119,7 @@ def split_by_month(df):
     return months
 
 # =====================================================
-# MONTHLY SUMMARY (BANK-GRADE LOGIC)
+# MONTHLY SUMMARY (BANK-GRADE, FINAL)
 # =====================================================
 def compute_monthly_summary(all_months, od_limit):
     rows = []
@@ -135,24 +135,24 @@ def compute_monthly_summary(all_months, od_limit):
         first_day_txns = df[df["_dt"] == min_date]
         last_day_txns = df[df["_dt"] == max_date]
 
-     if prev_ending is None:
-    # FIRST MONTH ONLY
-    opening = (
-        first_day_txns["balance"]
-        + first_day_txns["debit"]
-        - first_day_txns["credit"]
-    ).max()
-else:
-    # ALL OTHER MONTHS – CONTINUITY RULE
-    opening = prev_ending
+        # ---------- OPENING ----------
+        if prev_ending is None:
+            # FIRST MONTH ONLY
+            opening = (
+                first_day_txns["balance"]
+                + first_day_txns["debit"]
+                - first_day_txns["credit"]
+            ).max()
+        else:
+            # ALL OTHER MONTHS
+            opening = prev_ending
 
-
-        # ---- ENDING ----
+        # ---------- ENDING ----------
         ending = last_day_txns["balance"].iloc[-1]
 
         df.drop(columns="_dt", inplace=True)
 
-        # ---- AGGREGATES ----
+        # ---------- AGGREGATES ----------
         debit = df["debit"].sum()
         credit = df["credit"].sum()
         highest = df["balance"].max()
@@ -244,7 +244,7 @@ if st.button("Run Analysis"):
     st.dataframe(st.session_state.ratio_df, use_container_width=True)
 
 # =====================================================
-# EXPORT TO EXCEL (FINAL & WORKING)
+# EXPORT TO EXCEL
 # =====================================================
 if st.session_state.monthly_summary is not None:
 
