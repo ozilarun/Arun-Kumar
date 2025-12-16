@@ -129,10 +129,18 @@ def extract_cimb(pdf_path):
                     "balance": balance
                 })
 
-    df = pd.DataFrame(
+     df = pd.DataFrame(
         txns,
         columns=["date", "description", "debit", "credit", "balance"]
     )
 
+    # ===================================================
+    # CIMB FIX: FORCE CHRONOLOGICAL ORDER (ASCENDING)
+    # ===================================================
+    df["__dt"] = pd.to_datetime(df["date"], dayfirst=True, errors="coerce")
+    df = df.sort_values("__dt", ascending=True)
+    df = df.drop(columns="__dt").reset_index(drop=True)
+
     print(f"✔ CIMB extracted {len(df)} transactions from {Path(pdf_path).name}")
     return df
+
