@@ -3,11 +3,11 @@ import tempfile
 import pandas as pd
 
 from openpyxl import Workbook
-from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
+from openpyxl.styles import Font, PatternFill, Border, Side
 from openpyxl.utils.dataframe import dataframe_to_rows
 
 # ===============================
-# BANK IMPORTS
+# BANK IMPORTS (DO NOT TOUCH)
 # ===============================
 from bank_rakyat import extract_bank_rakyat
 from bank_islam import extract_bank_islam
@@ -50,7 +50,7 @@ if not uploaded_files:
     st.stop()
 
 # ===============================
-# EXTRACTION
+# EXTRACTION (NO LOGIC CHANGE)
 # ===============================
 extractor = BANK_EXTRACTORS[bank_choice]
 all_dfs = []
@@ -68,7 +68,17 @@ if not all_dfs:
     st.error("No transactions extracted.")
     st.stop()
 
+# ===============================
+# COMBINE & SORT (CRITICAL FIX)
+# ===============================
 df_all = pd.concat(all_dfs, ignore_index=True)
+
+# 🔒 FORCE chronological order (THIS FIXES WRONG TOTALS)
+df_all["date"] = pd.to_datetime(df_all["date"], dayfirst=True)
+df_all = df_all.sort_values("date").reset_index(drop=True)
+
+st.subheader("📄 Cleaned Transaction List (Chronological)")
+st.dataframe(df_all, use_container_width=True)
 
 # ===============================
 # OD LIMIT
@@ -80,7 +90,7 @@ OD_LIMIT = st.number_input(
 )
 
 # ===============================
-# HELPER FUNCTIONS
+# HELPER FUNCTIONS (UNCHANGED LOGIC)
 # ===============================
 def compute_opening_balance(df):
     first = df.iloc[0]
@@ -89,12 +99,16 @@ def compute_opening_balance(df):
 
 def split_by_month(df):
     df = df.copy()
-    df["Month"] = pd.to_datetime(df["date"], dayfirst=True).dt.strftime("%b %Y")
-    return dict(tuple(df.groupby("Month")))
+    df["Month"] = df["date"].dt.to_period("M")
+    return {
+        m.strftime("%b %Y"): g.copy()
+        for m, g in df.groupby("Month", sort=True)
+    }
 
 
 def compute_monthly_summary(all_months, od_limit):
     rows = []
+
     for month, df in all_months.items():
         opening = compute_opening_balance(df)
         ending = df.iloc[-1]["balance"]
@@ -126,6 +140,7 @@ def compute_monthly_summary(all_months, od_limit):
 
 def compute_ratios(summary, od_limit):
     df = summary.copy()
+
     ratio = {
         "Total Credit (6 Months)": df["Credit"].sum(),
         "Total Debit (6 Months)": df["Debit"].sum(),
@@ -142,8 +157,8 @@ def compute_ratios(summary, od_limit):
         "Returned Cheques": 0,
         "Number of Excesses": int((df["OD Util (RM)"] > od_limit).sum()) if od_limit > 0 else 0
     }
-    return pd.DataFrame(list(ratio.items()), columns=["Metric", "Value"])
 
+    return pd.DataFrame(list(ratio.items()), columns=["Metric", "Value"])
 
 # ===============================
 # EXCEL EXPORT (ONE SHEET)
@@ -164,31 +179,30 @@ def export_analysis_excel(monthly_df, ratio_df, output_path):
     ws["A1"].font = title_font
     ws.append([])
 
-    ws.append(["MONTHLY SUMMARY"])
+    ws.append(["MONTHLY TRANSACTION SUMMARY"])
     ws.append([])
 
     start = ws.max_row + 1
     for r in dataframe_to_rows(monthly_df, index=False, header=True):
         ws.append(r)
 
-    for cell in ws[start]:
-        cell.fill = header_fill
-        cell.font = header_font
-        cell.border = border
+    for c in ws[start]:
+        c.fill = header_fill
+        c.font = header_font
+        c.border = border
 
     ws.append([])
-    ws.append([])
-    ws.append(["FINANCIAL RATIOS"])
+    ws.append(["FINANCIAL RATIOS & CALCULATIONS"])
     ws.append([])
 
     rstart = ws.max_row + 1
     for r in dataframe_to_rows(ratio_df, index=False, header=True):
         ws.append(r)
 
-    for cell in ws[rstart]:
-        cell.fill = header_fill
-        cell.font = header_font
-        cell.border = border
+    for c in ws[rstart]:
+        c.fill = header_fill
+        c.font = header_font
+        c.border = border
 
     for col in ws.columns:
         ws.column_dimensions[col[0].column_letter].width = 22
@@ -196,12 +210,12 @@ def export_analysis_excel(monthly_df, ratio_df, output_path):
     wb.save(output_path)
     return output_path
 
-
 # ===============================
 # RUN ANALYSIS
 # ===============================
 if st.button("Run Analysis"):
     months = split_by_month(df_all)
+
     monthly_summary = compute_monthly_summary(months, OD_LIMIT).reset_index(drop=True)
     ratio_df = compute_ratios(monthly_summary, OD_LIMIT).reset_index(drop=True)
 
@@ -212,9 +226,9 @@ if st.button("Run Analysis"):
     st.dataframe(ratio_df, use_container_width=True)
 
     with tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx") as tmp:
-        path = export_analysis_excel(monthly_summary, ratio_df, tmp.name)
+        export_analysis_excel(monthly_summary, ratio_df, tmp.name)
 
-    with open(path, "rb") as f:
+    with open(tmp.name, "rb") as f:
         st.download_button(
             "⬇️ Download Excel (Monthly + Ratios)",
             f,
