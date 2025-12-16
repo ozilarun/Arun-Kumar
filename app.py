@@ -83,7 +83,7 @@ OD_LIMIT = st.number_input(
 )
 
 # =====================================================
-# HELPERS (NOTEBOOK-CORRECT)
+# HELPERS
 # =====================================================
 def compute_opening_balance_from_row(row):
     return row["balance"] + row["debit"] - row["credit"]
@@ -120,7 +120,7 @@ def compute_monthly_summary(all_months, od_limit, bank_name):
     for month, df in all_months.items():
 
         # ===== OPENING & ENDING =====
-               if bank_name == "CIMB":
+        if bank_name == "CIMB":
             # CIMB statements are in DESCENDING date order
             earliest_txn = df.iloc[-1]   # earliest date (month start)
             latest_txn = df.iloc[0]      # latest date (month end)
@@ -135,7 +135,6 @@ def compute_monthly_summary(all_months, od_limit, bank_name):
             opening = prev_ending
 
         ending = latest_txn["balance"]
-
 
         # ===== AGGREGATES =====
         debit = df["debit"].sum()
