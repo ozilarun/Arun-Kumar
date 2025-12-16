@@ -6,24 +6,24 @@ from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Border, Side
 from openpyxl.utils.dataframe import dataframe_to_rows
 
-# ===============================
-# BANK IMPORTS (DO NOT TOUCH)
-# ===============================
+# =====================================================
+# BANK IMPORTS (DO NOT TOUCH – YOUR ORIGINAL CODES)
+# =====================================================
 from bank_rakyat import extract_bank_rakyat
 from bank_islam import extract_bank_islam
 from cimb import extract_cimb
 from maybank import extract_maybank
 from rhb import extract_rhb
 
-# ===============================
+# =====================================================
 # PAGE SETUP
-# ===============================
+# =====================================================
 st.set_page_config(page_title="Bank Statement Analysis", layout="wide")
 st.title("🏦 Bank Statement Analysis")
 
-# ===============================
+# =====================================================
 # BANK SELECTION
-# ===============================
+# =====================================================
 bank_choice = st.selectbox(
     "Select Bank",
     ["Bank Rakyat", "Bank Islam", "CIMB", "Maybank", "RHB"]
@@ -37,9 +37,9 @@ BANK_EXTRACTORS = {
     "RHB": extract_rhb,
 }
 
-# ===============================
+# =====================================================
 # FILE UPLOAD
-# ===============================
+# =====================================================
 uploaded_files = st.file_uploader(
     "Upload Bank Statement PDF(s)",
     type=["pdf"],
@@ -49,9 +49,9 @@ uploaded_files = st.file_uploader(
 if not uploaded_files:
     st.stop()
 
-# ===============================
+# =====================================================
 # EXTRACTION (NO LOGIC CHANGE)
-# ===============================
+# =====================================================
 extractor = BANK_EXTRACTORS[bank_choice]
 all_dfs = []
 
@@ -68,30 +68,29 @@ if not all_dfs:
     st.error("No transactions extracted.")
     st.stop()
 
-# ===============================
-# COMBINE & SORT (CRITICAL FIX)
-# ===============================
+# =====================================================
+# COMBINE + SORT (ABSOLUTELY CRITICAL)
+# =====================================================
 df_all = pd.concat(all_dfs, ignore_index=True)
 
-# 🔒 FORCE chronological order (THIS FIXES WRONG TOTALS)
 df_all["date"] = pd.to_datetime(df_all["date"], dayfirst=True)
 df_all = df_all.sort_values("date").reset_index(drop=True)
 
 st.subheader("📄 Cleaned Transaction List (Chronological)")
 st.dataframe(df_all, use_container_width=True)
 
-# ===============================
+# =====================================================
 # OD LIMIT
-# ===============================
+# =====================================================
 OD_LIMIT = st.number_input(
     "Enter OD Limit (RM)",
     min_value=0.0,
     step=1000.0
 )
 
-# ===============================
-# HELPER FUNCTIONS (UNCHANGED LOGIC)
-# ===============================
+# =====================================================
+# HELPER FUNCTIONS (MATCH NOTEBOOK EXACTLY)
+# =====================================================
 def compute_opening_balance(df):
     first = df.iloc[0]
     return first["balance"] + first["debit"] - first["credit"]
@@ -99,11 +98,15 @@ def compute_opening_balance(df):
 
 def split_by_month(df):
     df = df.copy()
-    df["Month"] = df["date"].dt.to_period("M")
-    return {
-        m.strftime("%b %Y"): g.copy()
-        for m, g in df.groupby("Month", sort=True)
-    }
+    df["MonthKey"] = df["date"].dt.to_period("M")
+
+    monthly = {}
+    for m, g in df.groupby("MonthKey", sort=True):
+        monthly[m.strftime("%b %Y")] = g.reset_index(drop=True)
+
+    return monthly
+
+
 def compute_monthly_summary(all_months, od_limit):
     rows = []
     prev_ending = None
@@ -111,7 +114,7 @@ def compute_monthly_summary(all_months, od_limit):
     for month in sorted(all_months.keys(), key=lambda x: pd.to_datetime(x)):
         df = all_months[month]
 
-        # ✅ Opening logic (MATCHES NOTEBOOK)
+        # 🔒 OPENING BALANCE LOGIC (NOTEBOOK-CORRECT)
         if prev_ending is None:
             opening = compute_opening_balance(df)
         else:
@@ -119,13 +122,13 @@ def compute_monthly_summary(all_months, od_limit):
 
         ending = df.iloc[-1]["balance"]
 
-        total_debit = df["debit"].sum()
-        total_credit = df["credit"].sum()
-
+        debit = df["debit"].sum()
+        credit = df["credit"].sum()
         highest = df["balance"].max()
         lowest = df["balance"].min()
         swing = abs(highest - lowest)
 
+        # 🔒 OD RULE (STRICT)
         if od_limit > 0:
             od_util = abs(ending) if ending < 0 else 0
             od_pct = (od_util / od_limit) * 100
@@ -136,8 +139,8 @@ def compute_monthly_summary(all_months, od_limit):
         rows.append({
             "Month": month,
             "Opening": opening,
-            "Debit": total_debit,
-            "Credit": total_credit,
+            "Debit": debit,
+            "Credit": credit,
             "Ending": ending,
             "Highest": highest,
             "Lowest": lowest,
@@ -146,7 +149,7 @@ def compute_monthly_summary(all_months, od_limit):
             "OD %": od_pct
         })
 
-        prev_ending = ending   # 🔑 carry forward
+        prev_ending = ending
 
     return pd.DataFrame(rows)
 
@@ -154,7 +157,6 @@ def compute_monthly_summary(all_months, od_limit):
 def compute_ratios(summary, od_limit):
     df = summary.copy()
 
-    # 🔒 CRITICAL: OD logic must respect OD_LIMIT = 0
     if od_limit <= 0:
         avg_od_util = 0
         avg_od_pct = 0
@@ -185,10 +187,9 @@ def compute_ratios(summary, od_limit):
 
     return pd.DataFrame(list(ratio.items()), columns=["Metric", "Value"])
 
-
-# ===============================
-# EXCEL EXPORT (ONE SHEET)
-# ===============================
+# =====================================================
+# EXCEL EXPORT – ONE SHEET (NOTEBOOK STYLE)
+# =====================================================
 def export_analysis_excel(monthly_df, ratio_df, output_path):
     wb = Workbook()
     ws = wb.active
@@ -236,14 +237,20 @@ def export_analysis_excel(monthly_df, ratio_df, output_path):
     wb.save(output_path)
     return output_path
 
-# ===============================
+# =====================================================
 # RUN ANALYSIS
-# ===============================
+# =====================================================
 if st.button("Run Analysis"):
+
     months = split_by_month(df_all)
 
-    monthly_summary = compute_monthly_summary(months, OD_LIMIT).reset_index(drop=True)
-    ratio_df = compute_ratios(monthly_summary, OD_LIMIT).reset_index(drop=True)
+    st.subheader("📂 Monthly Breakdown (Audit View)")
+    for m, mdf in months.items():
+        st.markdown(f"### {m}")
+        st.dataframe(mdf, use_container_width=True)
+
+    monthly_summary = compute_monthly_summary(months, OD_LIMIT)
+    ratio_df = compute_ratios(monthly_summary, OD_LIMIT)
 
     st.subheader("📅 Monthly Summary")
     st.dataframe(monthly_summary, use_container_width=True)
