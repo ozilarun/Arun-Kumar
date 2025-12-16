@@ -105,28 +105,43 @@ def split_by_month(df):
         for m, g in df.groupby("Month", sort=True)
     }
 
-
 def compute_monthly_summary(all_months, od_limit):
-    rows = []
+    results = []
+
+    prev_ending = None  # 🔑 KEY FIX
 
     for month, df in all_months.items():
-        opening = compute_opening_balance(df)
+
+        if prev_ending is None:
+            # FIRST MONTH ONLY → derive opening from first txn
+            first = df.iloc[0]
+            opening = first["balance"] + first["debit"] - first["credit"]
+        else:
+            # 🔥 ALL OTHER MONTHS
+            opening = prev_ending
+
         ending = df.iloc[-1]["balance"]
 
-        debit = df["debit"].sum()
-        credit = df["credit"].sum()
+        total_debit = df["debit"].sum()
+        total_credit = df["credit"].sum()
+
         highest = df["balance"].max()
         lowest = df["balance"].min()
         swing = abs(highest - lowest)
 
-        od_util = abs(ending) if ending < 0 else 0
-        od_pct = (od_util / od_limit * 100) if od_limit > 0 else 0
+        # ✅ OD LOGIC EXACTLY LIKE NOTEBOOK
+        if od_limit > 0:
+            od_util = abs(ending) if ending < 0 else 0
+            od_pct = (od_util / od_limit) * 100
+        else:
+            od_util = 0
+            od_pct = 0
 
-        rows.append({
+        results.append({
             "Month": month,
             "Opening": opening,
-            "Debit": debit,
-            "Credit": credit,
+            "Debit": total_debit,
+            "Credit": total_credit,
             "Ending": ending,
             "Highest": highest,
             "Lowest": lowest,
@@ -135,7 +150,9 @@ def compute_monthly_summary(all_months, od_limit):
             "OD %": od_pct
         })
 
-    return pd.DataFrame(rows)
+        prev_ending = ending  # 🔑 CRITICAL
+
+    return pd.DataFrame(results)
 
 def compute_ratios(summary, od_limit):
     df = summary.copy()
