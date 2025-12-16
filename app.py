@@ -7,7 +7,7 @@ from openpyxl.styles import Font, PatternFill, Border, Side
 from openpyxl.utils.dataframe import dataframe_to_rows
 
 # =====================================================
-# BANK IMPORTS (DO NOT TOUCH – YOUR ORIGINAL CODES)
+# BANK IMPORTS (DO NOT TOUCH)
 # =====================================================
 from bank_rakyat import extract_bank_rakyat
 from bank_islam import extract_bank_islam
@@ -86,19 +86,21 @@ OD_LIMIT = st.number_input(
 )
 
 # =====================================================
-# HELPER FUNCTIONS (MATCH NOTEBOOK EXACTLY)
+# HELPER FUNCTIONS
 # =====================================================
 def compute_opening_balance(df):
     first = df.iloc[0]
     return first["balance"] + first["debit"] - first["credit"]
 
-
-# ✅ MONTH SPLIT — CORRECT MONTH ORDER, ROW ORDER PRESERVED
+# -----------------------------------------------------
+# Month split:
+# ✔ month order by FIRST transaction date
+# ✔ row order preserved
+# -----------------------------------------------------
 def split_by_month(df):
     temp = df.copy()
     temp["_dt"] = pd.to_datetime(temp["date"], dayfirst=True)
 
-    # Determine month order by FIRST transaction date per month
     month_order = (
         temp.assign(m=temp["_dt"].dt.to_period("M"))
             .groupby("m")["_dt"]
@@ -118,16 +120,17 @@ def split_by_month(df):
 
     return months
 
-
+# -----------------------------------------------------
+# Monthly summary (BANK-AWARE)
+# -----------------------------------------------------
 def compute_monthly_summary(all_months, od_limit, bank_name):
     rows = []
     prev_ending = None
 
     for month, df in all_months.items():
 
-        # 🔑 BANK-AWARE OPENING / ENDING
         if bank_name == "CIMB":
-            # CIMB = DESCENDING
+            # 🔑 CIMB = DESCENDING
             if prev_ending is None:
                 last = df.iloc[-1]
                 opening = last["balance"] + last["debit"] - last["credit"]
@@ -137,10 +140,9 @@ def compute_monthly_summary(all_months, od_limit, bank_name):
             ending = df.iloc[0]["balance"]
 
         else:
-            # ALL OTHER BANKS = ASCENDING
+            # 🔑 ALL OTHER BANKS = ASCENDING
             if prev_ending is None:
-                first = df.iloc[0]
-                opening = first["balance"] + first["debit"] - first["credit"]
+                opening = compute_opening_balance(df)
             else:
                 opening = prev_ending
 
@@ -176,6 +178,9 @@ def compute_monthly_summary(all_months, od_limit, bank_name):
 
     return pd.DataFrame(rows)
 
+# -----------------------------------------------------
+# Ratios
+# -----------------------------------------------------
 def compute_ratios(summary, od_limit):
     df = summary.copy()
 
@@ -210,7 +215,7 @@ def compute_ratios(summary, od_limit):
     return pd.DataFrame(list(ratio.items()), columns=["Metric", "Value"])
 
 # =====================================================
-# EXCEL EXPORT – ONE SHEET (NOTEBOOK STYLE)
+# EXCEL EXPORT (BASIC – WE WILL BEAUTIFY NEXT)
 # =====================================================
 def export_analysis_excel(monthly_df, ratio_df, output_path):
     wb = Workbook()
@@ -273,7 +278,7 @@ if st.button("Run Analysis"):
         st.markdown(f"### {m}")
         st.dataframe(audit_df, use_container_width=True)
 
-    monthly_summary = compute_monthly_summary(months, OD_LIMIT)
+    monthly_summary = compute_monthly_summary(months, OD_LIMIT, bank_choice)
     ratio_df = compute_ratios(monthly_summary, OD_LIMIT)
 
     st.subheader("📅 Monthly Summary")
