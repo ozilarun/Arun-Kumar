@@ -137,9 +137,20 @@ def compute_monthly_summary(all_months, od_limit):
 
     return pd.DataFrame(rows)
 
-
 def compute_ratios(summary, od_limit):
     df = summary.copy()
+
+    # 🔒 CRITICAL: OD logic must respect OD_LIMIT = 0
+    if od_limit <= 0:
+        avg_od_util = 0
+        avg_od_pct = 0
+        num_excess = 0
+        pct_swing = 0
+    else:
+        avg_od_util = df["OD Util (RM)"].mean()
+        avg_od_pct = df["OD %"].mean()
+        num_excess = int((df["OD Util (RM)"] > od_limit).sum())
+        pct_swing = (df["Swing"].mean() / od_limit) * 100
 
     ratio = {
         "Total Credit (6 Months)": df["Credit"].sum(),
@@ -150,15 +161,16 @@ def compute_ratios(summary, od_limit):
         "Average Ending Balance": df["Ending"].mean(),
         "Highest Balance (Period)": df["Highest"].max(),
         "Lowest Balance (Period)": df["Lowest"].min(),
-        "Average OD Utilization (RM)": df["OD Util (RM)"].mean(),
-        "Average % OD Utilization": df["OD %"].mean(),
+        "Average OD Utilization (RM)": avg_od_util,
+        "Average % OD Utilization": avg_od_pct,
         "Average Monthly Swing (RM)": df["Swing"].mean(),
-        "% of Swing": (df["Swing"].mean() / od_limit * 100) if od_limit > 0 else 0,
+        "% of Swing": pct_swing,
         "Returned Cheques": 0,
-        "Number of Excesses": int((df["OD Util (RM)"] > od_limit).sum()) if od_limit > 0 else 0
+        "Number of Excesses": num_excess
     }
 
     return pd.DataFrame(list(ratio.items()), columns=["Metric", "Value"])
+
 
 # ===============================
 # EXCEL EXPORT (ONE SHEET)
