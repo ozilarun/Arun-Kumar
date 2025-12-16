@@ -118,28 +118,40 @@ def compute_monthly_summary(all_months, od_limit, bank_name):
 
     for month, df in all_months.items():
 
-        # --- DATE LOGIC (AS REQUESTED) ---
-        df["_dt"] = pd.to_datetime(df["date"], dayfirst=True)
-
-        earliest_txn = df.loc[df["_dt"].idxmin()]
-        latest_txn = df.loc[df["_dt"].idxmax()]
-
-        df.drop(columns="_dt", inplace=True)
-
-        # --- OPENING ---
+        # =================================================
+        # OPENING LOGIC
+        # =================================================
         if prev_ending is None:
+            # ---- FIRST MONTH ONLY ----
+            if bank_name == "CIMB":
+                # CIMB table is DESCENDING → first txn is BOTTOM row
+                first_txn = df.iloc[-1]
+            else:
+                # Other banks → first txn is TOP row
+                first_txn = df.iloc[0]
+
             opening = (
-                earliest_txn["balance"]
-                + earliest_txn["debit"]
-                - earliest_txn["credit"]
+                first_txn["balance"]
+                + first_txn["debit"]
+                - first_txn["credit"]
             )
         else:
+            # ---- CONTINUITY FOR ALL OTHER MONTHS ----
             opening = prev_ending
 
-        # --- ENDING ---
-        ending = latest_txn["balance"]
+        # =================================================
+        # ENDING LOGIC
+        # =================================================
+        if bank_name == "CIMB":
+            # DESCENDING → last txn is TOP row
+            ending = df.iloc[0]["balance"]
+        else:
+            # ASCENDING → last txn is BOTTOM row
+            ending = df.iloc[-1]["balance"]
 
-        # --- AGGREGATES ---
+        # =================================================
+        # AGGREGATES
+        # =================================================
         debit = df["debit"].sum()
         credit = df["credit"].sum()
         highest = df["balance"].max()
@@ -169,6 +181,7 @@ def compute_monthly_summary(all_months, od_limit, bank_name):
         prev_ending = ending
 
     return pd.DataFrame(rows)
+
 
 # =====================================================
 # RATIOS
