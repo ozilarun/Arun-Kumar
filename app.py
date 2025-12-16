@@ -135,15 +135,17 @@ def compute_monthly_summary(all_months, od_limit):
         first_day_txns = df[df["_dt"] == min_date]
         last_day_txns = df[df["_dt"] == max_date]
 
-        # ---- OPENING ----
-        if prev_ending is None:
-            opening = (
-                first_day_txns["balance"]
-                + first_day_txns["debit"]
-                - first_day_txns["credit"]
-            ).max()
-        else:
-            opening = prev_ending
+     if prev_ending is None:
+    # FIRST MONTH ONLY
+    opening = (
+        first_day_txns["balance"]
+        + first_day_txns["debit"]
+        - first_day_txns["credit"]
+    ).max()
+else:
+    # ALL OTHER MONTHS – CONTINUITY RULE
+    opening = prev_ending
+
 
         # ---- ENDING ----
         ending = last_day_txns["balance"].iloc[-1]
