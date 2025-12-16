@@ -121,23 +121,22 @@ def compute_monthly_summary(all_months, od_limit, bank_name):
         # =================================================
         # OPENING LOGIC
         # =================================================
-        if prev_ending is None:
-            # ---- FIRST MONTH ONLY ----
-            if bank_name == "CIMB":
-                # CIMB table is DESCENDING → first txn is BOTTOM row
-                first_txn = df.iloc[-1]
-            else:
-                # Other banks → first txn is TOP row
-                first_txn = df.iloc[0]
+      if prev_ending is None:
+    if bank_name == "CIMB":
+        # CIMB first month: table is DESCENDING → opening from LAST row
+        first_txn = df.iloc[-1]
+    else:
+        # Other banks
+        first_txn = earliest_txn
 
-            opening = (
-                first_txn["balance"]
-                + first_txn["debit"]
-                - first_txn["credit"]
-            )
-        else:
-            # ---- CONTINUITY FOR ALL OTHER MONTHS ----
-            opening = prev_ending
+    opening = (
+        first_txn["balance"]
+        + first_txn["debit"]
+        - first_txn["credit"]
+    )
+else:
+    opening = prev_ending
+
 
         # =================================================
         # ENDING LOGIC
