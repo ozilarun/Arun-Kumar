@@ -113,25 +113,33 @@ def compute_monthly_summary(all_months, od_limit, bank_name):
     prev_ending = None
     
     for month, df in all_months.items():
-        # ===== OPENING & ENDING =====
-        if bank_name == "CIMB":
-            # CIMB: descending order (31/12 to 1/1)
-            # First row (index 0) = latest date (end of month)
-            # Last row (index -1) = earliest date (start of month)
-            first_txn = df.iloc[-1]  # earliest date (start of month)
-            last_txn = df.iloc[0]    # latest date (end of month)
-        else:
-            # Other banks: ascending order (1/1 to 31/12)
-            # First row (index 0) = earliest date (start of month)
-            # Last row (index -1) = latest date (end of month)
-            first_txn = df.iloc[0]   # earliest date
-            last_txn = df.iloc[-1]   # latest date
+        # Convert dates to datetime for proper comparison
+        df_temp = df.copy()
+        df_temp["_dt"] = pd.to_datetime(df_temp["date"], dayfirst=True)
         
+        # Find the earliest date (start of month)
+        min_date = df_temp["_dt"].min()
+        # Find the latest date (end of month)
+        max_date = df_temp["_dt"].max()
+        
+        # Get all transactions on the earliest date
+        first_date_txns = df_temp[df_temp["_dt"] == min_date]
+        # Get all transactions on the latest date
+        last_date_txns = df_temp[df_temp["_dt"] == max_date]
+        
+        # For earliest date: use FIRST transaction of that day
+        first_txn = first_date_txns.iloc[0]
+        
+        # For latest date: use LAST transaction of that day
+        last_txn = last_date_txns.iloc[-1]
+        
+        # Calculate opening balance
         if prev_ending is None:
             opening = compute_opening_balance_from_row(first_txn)
         else:
             opening = prev_ending
         
+        # Ending balance is the balance after the last transaction
         ending = last_txn["balance"]
         
         # ===== AGGREGATES =====
