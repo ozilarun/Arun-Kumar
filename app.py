@@ -203,3 +203,101 @@ if st.button("Run Analysis"):
 
     st.subheader("📊 Financial Ratios")
     st.dataframe(ratio_df, use_container_width=True)
+    from openpyxl import Workbook
+from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
+from openpyxl.utils.dataframe import dataframe_to_rows
+
+
+def export_analysis_excel(monthly_df, ratio_df, output_path):
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Statement Analysis"
+
+    # -------------------------
+    # Styles
+    # -------------------------
+    header_fill = PatternFill("solid", fgColor="1F4E78")
+    header_font = Font(color="FFFFFF", bold=True)
+    title_font = Font(size=14, bold=True)
+
+    thin = Side(style="thin")
+    border = Border(left=thin, right=thin, top=thin, bottom=thin)
+
+    # -------------------------
+    # Title
+    # -------------------------
+    ws.append(["BANK STATEMENT ANALYSIS"])
+    ws["A1"].font = title_font
+    ws.append([])
+
+    # =========================
+    # MONTHLY SUMMARY
+    # =========================
+    ws.append(["MONTHLY SUMMARY"])
+    ws["A3"].font = Font(bold=True)
+    ws.append([])
+
+    start_row = ws.max_row + 1
+
+    for r in dataframe_to_rows(monthly_df, index=False, header=True):
+        ws.append(r)
+
+    # Format Monthly Summary
+    for cell in ws[start_row]:
+        cell.fill = header_fill
+        cell.font = header_font
+        cell.border = border
+        cell.alignment = Alignment(horizontal="center")
+
+    for row in ws.iter_rows(
+        min_row=start_row + 1,
+        max_row=ws.max_row,
+        min_col=1,
+        max_col=len(monthly_df.columns)
+    ):
+        for cell in row:
+            cell.border = border
+            if isinstance(cell.value, (int, float)):
+                cell.number_format = "#,##0.00"
+
+    # =========================
+    # SPACE BEFORE RATIOS
+    # =========================
+    ws.append([])
+    ws.append([])
+    ws.append(["FINANCIAL RATIOS"])
+    ws["A" + str(ws.max_row)].font = Font(bold=True)
+    ws.append([])
+
+    ratio_start = ws.max_row + 1
+
+    for r in dataframe_to_rows(ratio_df, index=False, header=True):
+        ws.append(r)
+
+    # Format Ratio Table
+    for cell in ws[ratio_start]:
+        cell.fill = header_fill
+        cell.font = header_font
+        cell.border = border
+
+    for row in ws.iter_rows(
+        min_row=ratio_start + 1,
+        max_row=ws.max_row,
+        min_col=1,
+        max_col=2
+    ):
+        for cell in row:
+            cell.border = border
+            if isinstance(cell.value, (int, float)):
+                cell.number_format = "#,##0.00"
+
+    # -------------------------
+    # Auto column width
+    # -------------------------
+    for col in ws.columns:
+        max_len = max(len(str(cell.value)) if cell.value else 0 for cell in col)
+        ws.column_dimensions[col[0].column_letter].width = max_len + 3
+
+    wb.save(output_path)
+    return output_path
+
