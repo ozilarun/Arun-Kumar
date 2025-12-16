@@ -1,153 +1,141 @@
 import streamlit as st
-import pdfplumber
-import json
+import tempfile
 import pandas as pd
-from tabulate import tabulate
 
-from maybank import parse_transactions_maybank
-from public_bank import parse_transactions_pbb
-from rhb import parse_transactions_rhb
-
-
-# ---------------------------------------------------
-# Streamlit Setup
-# ---------------------------------------------------
-
-st.set_page_config(page_title="Bank Statement Parser", layout="wide")
-
-st.title("📄 Bank Statement Parser (Multi-File Support)")
-st.write("Upload one or more bank statement PDFs to extract transactions into a clean readable table.")
-
+from bank_rakyat import extract_bank_rakyat
+from bank_islam import extract_bank_islam
+from cimb import extract_cimb
+from maybank import extract_maybank
+from rhb import extract_rhb
 
 # ---------------------------------------------------
-# Bank Selection
+# PAGE SETUP
+# ---------------------------------------------------
+
+st.set_page_config(page_title="Bank Statement Analyzer", layout="wide")
+st.title("🏦 Bank Statement Analyzer")
+st.write("Upload bank statements, enter OD limit, and generate analysis.")
+
+# ---------------------------------------------------
+# BANK SELECTION
 # ---------------------------------------------------
 
 bank_choice = st.selectbox(
-    "Select Bank Format",
-    ["Auto-detect", "Maybank", "Public Bank (PBB)", "RHB Bank"]
+    "Select Bank",
+    [
+        "Bank Rakyat",
+        "Bank Islam",
+        "CIMB",
+        "Maybank",
+        "RHB"
+    ]
 )
 
-bank_hint = None
-if bank_choice == "Maybank":
-    bank_hint = "maybank"
-elif bank_choice == "Public Bank (PBB)":
-    bank_hint = "pbb"
-elif bank_choice == "RHB Bank":
-    bank_hint = "rhb"
-
-
-# ---------------------------------------------------
-# Multiple File Upload
-# ---------------------------------------------------
-
-uploaded_files = st.file_uploader("Upload PDF files", type=["pdf"], accept_multiple_files=True)
-default_year = st.text_input("Default Year", "2025")
-
+BANK_EXTRACTORS = {
+    "Bank Rakyat": extract_bank_rakyat,
+    "Bank Islam": extract_bank_islam,
+    "CIMB": extract_cimb,
+    "Maybank": extract_maybank,
+    "RHB": extract_rhb,
+}
 
 # ---------------------------------------------------
-# Auto Detect Parsing Logic
+# FILE UPLOAD
 # ---------------------------------------------------
 
-def auto_detect_and_parse(text, page_num, default_year="2025"):
-    tx = parse_transactions_maybank(text, page_num, default_year)
-    if tx:
-        return tx
+uploaded_files = st.file_uploader(
+    "Upload PDF statements",
+    type=["pdf"],
+    accept_multiple_files=True
+)
 
-    tx = parse_transactions_pbb(text, page_num, default_year)
-    if tx:
-        return tx
-
-    tx = parse_transactions_rhb(text, page_num)
-    if tx:
-        return tx
-
-    return []
-
+if not uploaded_files:
+    st.info("Please upload one or more PDF files.")
+    st.stop()
 
 # ---------------------------------------------------
-# Main Multi-File Processing
+# EXTRACTION
 # ---------------------------------------------------
 
-all_tx = []
+extractor = BANK_EXTRACTORS[bank_choice]
+all_dfs = []
 
-if uploaded_files:
-    for uploaded_file in uploaded_files:
+for uploaded_file in uploaded_files:
+    st.write(f"📄 Processing: **{uploaded_file.name}**")
 
-        st.write(f"Processing: **{uploaded_file.name}**")
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
+        tmp.write(uploaded_file.read())
+        pdf_path = tmp.name
 
-        with pdfplumber.open(uploaded_file) as pdf:
+    df = extractor(pdf_path)
 
-            for page_num, page in enumerate(pdf.pages, start=1):
-                text = page.extract_text() or ""
+    if df.empty:
+        st.warning(f"No transactions found in {uploaded_file.name}")
+        continue
 
-                # Parse by selected bank or auto-detect
-                if bank_hint == "maybank":
-                    tx = parse_transactions_maybank(text, page_num, default_year)
-
-                elif bank_hint == "pbb":
-                    tx = parse_transactions_pbb(text, page_num, default_year)
-
-                elif bank_hint == "rhb":
-                    tx = parse_transactions_rhb(text, page_num)
-
-                else:
-                    tx = auto_detect_and_parse(text, page_num, default_year)
-
-                # Add to main list
-                for t in tx:
-                    t["source_file"] = uploaded_file.name  # track which PDF it came from
-
-                all_tx.extend(tx)
-
-
-# ---------------------------------------------------
-# Display Results
-# ---------------------------------------------------
-
-if all_tx:
-    st.subheader("Extracted Transactions (Readable Table)")
-
-    df = pd.DataFrame(all_tx)
-
-    # Arrange columns nicely
-    column_order = ["date", "description", "debit", "credit", "balance", "page", "source_file"]
-    df = df[[c for c in column_order if c in df.columns]]
-
+    st.subheader(f"Extracted Transactions — {uploaded_file.name}")
     st.dataframe(df, use_container_width=True)
 
-    # JSON Export
-    json_data = json.dumps(all_tx, indent=4)
-    st.download_button("Download JSON", json_data, file_name="transactions.json", mime="application/json")
+    all_dfs.append(df)
 
+if not all_dfs:
+    st.error("No valid transactions detected.")
+    st.stop()
 
-    # ====================================================================
-    #           NEW TABULATE EXPORT (MATCHES NOTEBOOK PERFECTLY)
-    # ====================================================================
+df_all = pd.concat(all_dfs, ignore_index=True)
 
-    df_txt = df[["date", "description", "debit", "credit", "balance", "page"]]
+st.subheader("📚 Combined Transactions")
+st.dataframe(df_all, use_container_width=True)
 
-    # Format numeric fields
-    df_txt["debit"] = df_txt["debit"].apply(lambda x: f"{x:,.2f}")
-    df_txt["credit"] = df_txt["credit"].apply(lambda x: f"{x:,.2f}")
-    df_txt["balance"] = df_txt["balance"].apply(lambda x: f"{x:,.2f}")
+# ---------------------------------------------------
+# USER INPUT: OD LIMIT
+# ---------------------------------------------------
 
-    # Grid-style clean table
-    txt_data = tabulate(
-        df_txt.values,
-        headers=df_txt.columns,
-        tablefmt="grid",
-        stralign="left",
-        numalign="right"
-    )
+st.subheader("💳 OD Limit")
 
-    st.download_button(
-        "Download TXT",
-        txt_data,
-        file_name="transactions.txt",
-        mime="text/plain"
-    )
+OD_LIMIT = st.number_input(
+    "Enter OD Limit (RM)",
+    min_value=0.0,
+    step=1000.0
+)
 
+# ---------------------------------------------------
+# CALCULATION
+# ---------------------------------------------------
 
-else:
-    st.info("Upload one or more PDF files to begin.")
+if st.button("Run Analysis"):
+
+    first = df_all.iloc[0]
+    opening = first["balance"] + first["debit"] - first["credit"]
+
+    ending = df_all.iloc[-1]["balance"]
+
+    total_debit = df_all["debit"].sum()
+    total_credit = df_all["credit"].sum()
+
+    highest = df_all["balance"].max()
+    lowest = df_all["balance"].min()
+    swing = abs(highest - lowest)
+
+    if OD_LIMIT > 0:
+        od_util = abs(ending) if ending < 0 else 0
+        od_pct = (od_util / OD_LIMIT) * 100
+    else:
+        od_util = 0
+        od_pct = 0
+
+    summary = pd.DataFrame([{
+        "Opening Balance": opening,
+        "Total Debit": total_debit,
+        "Total Credit": total_credit,
+        "Ending Balance": ending,
+        "Highest Balance": highest,
+        "Lowest Balance": lowest,
+        "Swing": swing,
+        "OD Util (RM)": od_util,
+        "OD %": od_pct
+    }])
+
+    st.subheader("📊 Analysis Summary")
+    st.dataframe(summary, use_container_width=True)
+
