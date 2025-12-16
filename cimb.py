@@ -3,6 +3,11 @@ import pandas as pd
 import re
 from pathlib import Path
 
+from openpyxl import Workbook
+from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
+from openpyxl.utils.dataframe import dataframe_to_rows
+
+
 # ===================================================
 # MONTH MAP (FROM YOUR CODE)
 # ===================================================
@@ -17,17 +22,15 @@ MONTH_MAP = {
 
 def get_month_name(pdf_path):
     name = Path(pdf_path).stem.upper()
-
     for k, v in MONTH_MAP.items():
         if k in name:
             year = re.search(r"(20\d{2})", name)
             return f"{v} {year.group(1)}" if year else v
-
-    return "UnknownMonth"
+    return "Unknown Month"
 
 
 # ===================================================
-# 1️⃣ EXTRACTION — CIMB (UNCHANGED LOGIC)
+# 1️⃣ EXTRACTION — CIMB (YOUR LOGIC)
 # ===================================================
 
 def extract_cimb(pdf_path):
@@ -92,3 +95,99 @@ def extract_cimb(pdf_path):
         "date", "description", "debit", "credit", "balance"
     ])
 
+
+# ===================================================
+# 2️⃣ OPENING BALANCE (REVERSE FIRST TXN)
+# ===================================================
+
+def compute_opening_balance(df):
+    first = df.iloc[0]
+    return first["balance"] + first["debit"] - first["credit"]
+
+
+# ===================================================
+# 3️⃣ SUMMARY CALCULATION (OD LIMIT FROM USER)
+# ===================================================
+
+def compute_cimb_summary(df, od_limit):
+    opening = compute_opening_balance(df)
+    ending = df.iloc[-1]["balance"]
+
+    total_debit = df["debit"].sum()
+    total_credit = df["credit"].sum()
+
+    highest = df["balance"].max()
+    lowest = df["balance"].min()
+    swing = abs(highest - lowest)
+
+    if od_limit > 0:
+        od_util = abs(ending) if ending < 0 else 0
+        od_pct = (od_util / od_limit) * 100
+    else:
+        od_util = 0
+        od_pct = 0
+
+    return {
+        "Opening Balance": opening,
+        "Total Debit": total_debit,
+        "Total Credit": total_credit,
+        "Ending Balance": ending,
+        "Highest Balance": highest,
+        "Lowest Balance": lowest,
+        "Swing": swing,
+        "OD Util (RM)": od_util,
+        "OD %": od_pct
+    }
+
+
+# ===================================================
+# 4️⃣ EXCEL EXPORT — MATCHES YOUR FORMAT
+# ===================================================
+
+def export_cimb_excel(summary_df, output_file):
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Bank Analysis"
+
+    header_fill = PatternFill(start_color="1F4E78", end_color="1F4E78", fill_type="solid")
+    header_font = Font(color="FFFFFF", bold=True)
+
+    thin = Side(border_style="thin", color="000000")
+    thin_border = Border(top=thin, left=thin, right=thin, bottom=thin)
+
+    ws.append(["CIMB STATEMENT ANALYSIS"])
+    ws["A1"].font = Font(size=14, bold=True)
+    ws.append([])
+
+    start_row = ws.max_row + 1
+
+    for r in dataframe_to_rows(summary_df, index=False, header=True):
+        ws.append(r)
+
+    for cell in ws[start_row]:
+        cell.fill = header_fill
+        cell.font = header_font
+        cell.border = thin_border
+        cell.alignment = Alignment(horizontal="center")
+
+    for row in ws.iter_rows(
+        min_row=start_row + 1,
+        max_row=ws.max_row,
+        min_col=1,
+        max_col=len(summary_df.columns)
+    ):
+        for cell in row:
+            cell.border = thin_border
+            if isinstance(cell.value, (int, float)):
+                cell.number_format = "#,##0.00"
+
+    for col in ws.columns:
+        max_len = 0
+        col_letter = col[0].column_letter
+        for cell in col:
+            if cell.value:
+                max_len = max(max_len, len(str(cell.value)))
+        ws.column_dimensions[col_letter].width = max_len + 2
+
+    wb.save(output_file)
+    return output_file
