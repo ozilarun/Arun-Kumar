@@ -118,39 +118,44 @@ def compute_monthly_summary(all_months, od_limit, bank_name):
 
     for month, df in all_months.items():
 
-        # =================================================
-        # OPENING LOGIC
-        # =================================================
-      if prev_ending is None:
-    if bank_name == "CIMB":
-        # CIMB first month: table is DESCENDING → opening from LAST row
-        first_txn = df.iloc[-1]
-    else:
-        # Other banks
-        first_txn = earliest_txn
+        # ===============================
+        # DATE LOGIC (DEFAULT)
+        # ===============================
+        df["_dt"] = pd.to_datetime(df["date"], dayfirst=True)
 
-    opening = (
-        first_txn["balance"]
-        + first_txn["debit"]
-        - first_txn["credit"]
-    )
-else:
-    opening = prev_ending
+        earliest_txn = df.loc[df["_dt"].idxmin()]
+        latest_txn   = df.loc[df["_dt"].idxmax()]
 
+        # ===============================
+        # OPENING
+        # ===============================
+        if prev_ending is None:
+            # FIRST MONTH ONLY
+            if bank_name == "CIMB":
+                # CIMB first month is upside down → bottom row
+                first_txn = df.iloc[-1]
+            else:
+                first_txn = earliest_txn
 
-        # =================================================
-        # ENDING LOGIC
-        # =================================================
-        if bank_name == "CIMB":
-            # DESCENDING → last txn is TOP row
-            ending = df.iloc[0]["balance"]
+            opening = (
+                first_txn["balance"]
+                + first_txn["debit"]
+                - first_txn["credit"]
+            )
         else:
-            # ASCENDING → last txn is BOTTOM row
-            ending = df.iloc[-1]["balance"]
+            # CONTINUITY
+            opening = prev_ending
 
-        # =================================================
+        # ===============================
+        # ENDING (DATE-BASED)
+        # ===============================
+        ending = latest_txn["balance"]
+
+        df.drop(columns="_dt", inplace=True)
+
+        # ===============================
         # AGGREGATES
-        # =================================================
+        # ===============================
         debit = df["debit"].sum()
         credit = df["credit"].sum()
         highest = df["balance"].max()
