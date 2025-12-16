@@ -129,7 +129,7 @@ def extract_cimb(pdf_path):
                     "balance": balance
                 })
 
-     df = pd.DataFrame(
+        df = pd.DataFrame(
         txns,
         columns=["date", "description", "debit", "credit", "balance"]
     )
