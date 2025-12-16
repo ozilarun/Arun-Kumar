@@ -50,7 +50,7 @@ if not uploaded_files:
     st.stop()
 
 # =====================================================
-# EXTRACTION (NO SORTING, NO DATE CHANGES)
+# EXTRACTION
 # =====================================================
 extractor = BANK_EXTRACTORS[bank_choice]
 all_dfs = []
@@ -70,7 +70,7 @@ if not all_dfs:
 
 df_all = pd.concat(all_dfs, ignore_index=True)
 
-st.subheader("📄 Transactions (Original Order)")
+st.subheader("📄 Cleaned Transaction List (Original Order)")
 st.dataframe(df_all, use_container_width=True)
 
 # =====================================================
@@ -85,50 +85,64 @@ OD_LIMIT = st.number_input(
 # =====================================================
 # HELPERS (NOTEBOOK-CORRECT)
 # =====================================================
-def opening_from_row(row):
+def compute_opening_balance_from_row(row):
     return row["balance"] + row["debit"] - row["credit"]
 
 
 def split_by_month(df):
     temp = df.copy()
-    temp["_month"] = pd.to_datetime(temp["date"], dayfirst=True).dt.to_period("M")
+    temp["_dt"] = pd.to_datetime(temp["date"], dayfirst=True)
+
+    month_order = (
+        temp.assign(m=temp["_dt"].dt.to_period("M"))
+        .groupby("m")["_dt"]
+        .min()
+        .sort_values()
+        .index
+    )
 
     months = {}
-    for m in temp["_month"].unique():  # preserves appearance order
+    for m in month_order:
         label = m.strftime("%b %Y")
         months[label] = (
-            temp[temp["_month"] == m]
-            .drop(columns="_month")
+            temp[temp["_dt"].dt.to_period("M") == m]
+            .drop(columns="_dt")
             .reset_index(drop=True)
         )
+
     return months
 
 
-def compute_monthly_summary(months, od_limit, bank_name):
+def compute_monthly_summary(all_months, od_limit, bank_name):
     rows = []
+    prev_ending = None
 
-    for month, df in months.items():
+    for month, df in all_months.items():
 
-        # =========================
-        # OPENING & ENDING (KEY FIX)
-        # =========================
+        # ===== OPENING & ENDING =====
         if bank_name == "CIMB":
-            opening_row = df.iloc[-1]   # descending
-            ending = df.iloc[0]["balance"]
+            first_txn = df.iloc[-1]      # earliest date
+            last_txn = df.iloc[0]        # latest date
         else:
-            opening_row = df.iloc[0]    # ascending
-            ending = df.iloc[-1]["balance"]
+            first_txn = df.iloc[0]
+            last_txn = df.iloc[-1]
 
-        opening = opening_from_row(opening_row)
+        if prev_ending is None:
+            opening = compute_opening_balance_from_row(first_txn)
+        else:
+            opening = prev_ending
 
+        ending = last_txn["balance"]
+
+        # ===== AGGREGATES =====
         debit = df["debit"].sum()
         credit = df["credit"].sum()
         highest = df["balance"].max()
         lowest = df["balance"].min()
         swing = abs(highest - lowest)
 
-        if od_limit > 0 and ending < 0:
-            od_util = abs(ending)
+        if od_limit > 0:
+            od_util = abs(ending) if ending < 0 else 0
             od_pct = (od_util / od_limit) * 100
         else:
             od_util = 0
@@ -147,39 +161,31 @@ def compute_monthly_summary(months, od_limit, bank_name):
             "OD %": od_pct
         })
 
+        prev_ending = ending
+
     return pd.DataFrame(rows)
 
 
 def compute_ratios(summary, od_limit):
     df = summary.copy()
 
-    if od_limit <= 0:
-        avg_od_util = 0
-        avg_od_pct = 0
-        pct_swing = 0
-    else:
-        avg_od_util = df["OD Util (RM)"].mean()
-        avg_od_pct = df["OD %"].mean()
-        pct_swing = (df["Swing"].mean() / od_limit) * 100
+    return pd.DataFrame([
+        ("Total Credit (6 Months)", df["Credit"].sum()),
+        ("Total Debit (6 Months)", df["Debit"].sum()),
+        ("Annualized Credit", df["Credit"].sum() * 2),
+        ("Annualized Debit", df["Debit"].sum() * 2),
+        ("Average Opening Balance", df["Opening"].mean()),
+        ("Average Ending Balance", df["Ending"].mean()),
+        ("Highest Balance (Period)", df["Highest"].max()),
+        ("Lowest Balance (Period)", df["Lowest"].min()),
+        ("Average OD Utilization (RM)", df["OD Util (RM)"].mean() if od_limit > 0 else 0),
+        ("Average % OD Utilization", df["OD %"].mean() if od_limit > 0 else 0),
+        ("Average Monthly Swing (RM)", df["Swing"].mean()),
+        ("% of Swing", (df["Swing"].mean() / od_limit * 100) if od_limit > 0 else 0),
+        ("Returned Cheques", 0),
+        ("Number of Excesses", int((df["OD Util (RM)"] > od_limit).sum()) if od_limit > 0 else 0)
+    ], columns=["Metric", "Value"])
 
-    ratio = {
-        "Total Credit (6 Months)": df["Credit"].sum(),
-        "Total Debit (6 Months)": df["Debit"].sum(),
-        "Annualized Credit": df["Credit"].sum() * 2,
-        "Annualized Debit": df["Debit"].sum() * 2,
-        "Average Opening Balance": df["Opening"].mean(),
-        "Average Ending Balance": df["Ending"].mean(),
-        "Highest Balance (Period)": df["Highest"].max(),
-        "Lowest Balance (Period)": df["Lowest"].min(),
-        "Average OD Utilization (RM)": avg_od_util,
-        "Average % OD Utilization": avg_od_pct,
-        "Average Monthly Swing (RM)": df["Swing"].mean(),
-        "% of Swing": pct_swing,
-        "Returned Cheques": 0,
-        "Number of Excesses": 0
-    }
-
-    return pd.DataFrame(list(ratio.items()), columns=["Metric", "Value"])
 
 # =====================================================
 # RUN ANALYSIS
@@ -188,7 +194,7 @@ if st.button("Run Analysis"):
 
     months = split_by_month(df_all)
 
-    st.subheader("📂 Monthly Audit View")
+    st.subheader("📂 Monthly Breakdown (Audit)")
     for m, mdf in months.items():
         st.markdown(f"### {m}")
         st.dataframe(mdf, use_container_width=True)
