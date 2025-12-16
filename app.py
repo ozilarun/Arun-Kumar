@@ -125,17 +125,19 @@ def compute_monthly_summary(all_months, od_limit, bank_name):
         # ===============================
         df["_dt"] = pd.to_datetime(df["date"], dayfirst=True)
 
-        earliest_txn = df.loc[df["_dt"].idxmin()]
-        latest_txn = df.loc[df["_dt"].idxmax()]
+        min_date = df["_dt"].min()
 
-        df.drop(columns="_dt", inplace=True)
+first_day_txns = df[df["_dt"] == min_date]
 
-        if prev_ending is None:
-            opening = (
-                earliest_txn["balance"]
-                + earliest_txn["debit"]
-                - earliest_txn["credit"]
-            )
+if prev_ending is None:
+    opening = (
+        first_day_txns["balance"]
+        + first_day_txns["debit"]
+        - first_day_txns["credit"]
+    ).max()
+else:
+    opening = prev_ending
+
         else:
             opening = prev_ending
 
