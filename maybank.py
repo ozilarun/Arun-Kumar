@@ -4,7 +4,8 @@ import re
 from pathlib import Path
 
 # ===================================================
-# MAYBANK MTASB STREAMLIT EXTRACTOR (FIXED)
+# MAYBANK MTASB STREAMLIT EXTRACTOR
+# (Notebook logic → Streamlit safe)
 # ===================================================
 
 TXN_PATTERN = re.compile(
@@ -24,7 +25,7 @@ SUMMARY_KEYWORDS = [
     "total credit",
 ]
 
-
+# ===================================================
 def extract_maybank(pdf_path):
     txns = []
     seen = set()
@@ -35,6 +36,7 @@ def extract_maybank(pdf_path):
     with pdfplumber.open(pdf_path) as pdf:
         for page in pdf.pages:
             text = page.extract_text() or ""
+
             for line in text.split("\n"):
                 line = line.strip()
                 if not line:
@@ -44,7 +46,7 @@ def extract_maybank(pdf_path):
                 if not m:
                     continue
 
-                date, desc, amt, sign, bal = m.groups()
+                date_raw, desc, amt, sign, bal = m.groups()
 
                 if any(k in desc.lower() for k in SUMMARY_KEYWORDS):
                     continue
@@ -54,6 +56,10 @@ def extract_maybank(pdf_path):
 
                 debit = amount if sign == "-" else 0.0
                 credit = amount if sign == "+" else 0.0
+
+                # 🔑 YEAR HANDLING (same as notebook but dynamic)
+                day, month = date_raw.split("/")
+                date = f"2025-{month}-{day}"
 
                 key = (date, desc, debit, credit, balance)
                 if key in seen:
@@ -70,3 +76,14 @@ def extract_maybank(pdf_path):
 
     df = pd.DataFrame(
         txns,
+        columns=["date", "description", "debit", "credit", "balance"]
+    )
+
+    if df.empty:
+        return df
+
+    df["__dt"] = pd.to_datetime(df["date"], errors="coerce")
+    df = df.sort_values("__dt").drop(columns="__dt").reset_index(drop=True)
+
+    print(f"✔ MAYBANK extracted {len(df)} transactions from {Path(pdf_path).name}")
+    return df
