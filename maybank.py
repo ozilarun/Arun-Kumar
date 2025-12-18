@@ -4,21 +4,24 @@ import re
 from pathlib import Path
 
 # ===================================================
-# MAYBANK STREAMLIT SAFE EXTRACTOR (FIXED REGEX)
+# MAYBANK MTASB STREAMLIT EXTRACTOR (FIXED)
 # ===================================================
 
 TXN_PATTERN = re.compile(
-    r"(\d{2}/\d{2})\s+"        # date: 01/06
-    r"(.+?)\s+"               # description
-    r"([0-9,]+\.\d{2})"       # amount
-    r"([+-])\s*"              # sign (CRITICAL FIX)
-    r"([0-9,]+\.\d{2})"       # balance
+    r"(\d{2}/\d{2})\s+"          # 01/06
+    r"(.+?)\s+"                 # description
+    r"([0-9,]+\.\d{2})"         # amount
+    r"([+-])"                   # sign
+    r"([0-9,]+\.\d{2})"         # balance
 )
 
 SUMMARY_KEYWORDS = [
-    "opening balance", "closing balance",
-    "brought forward", "carried forward",
-    "total debit", "total credit"
+    "opening balance",
+    "closing balance",
+    "brought forward",
+    "carried forward",
+    "total debit",
+    "total credit",
 ]
 
 
@@ -67,14 +70,3 @@ def extract_maybank(pdf_path):
 
     df = pd.DataFrame(
         txns,
-        columns=["date", "description", "debit", "credit", "balance"]
-    )
-
-    if df.empty:
-        return df
-
-    df["__dt"] = pd.to_datetime(df["date"], dayfirst=True, errors="coerce")
-    df = df.sort_values("__dt").drop(columns="__dt").reset_index(drop=True)
-
-    print(f"✔ MAYBANK extracted {len(df)} transactions from {Path(pdf_path).name}")
-    return df
