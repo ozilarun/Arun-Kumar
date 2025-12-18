@@ -4,12 +4,14 @@ import re
 from pathlib import Path
 
 # ===================================================
-# MAYBANK MTASB STREAMLIT EXTRACTOR
-# (Notebook logic → Streamlit safe)
+# MAYBANK MTASB EXTRACTOR
+# (Converted from working Jupyter Notebook)
 # ===================================================
 
+# Pattern:
+# 01/06 TRANSFER TO A/C 320.00+61,430.41
 TXN_PATTERN = re.compile(
-    r"(\d{2}/\d{2})\s+"          # 01/06
+    r"(\d{2}/\d{2})\s+"          # date
     r"(.+?)\s+"                 # description
     r"([0-9,]+\.\d{2})"         # amount
     r"([+-])"                   # sign
@@ -27,7 +29,7 @@ SUMMARY_KEYWORDS = [
 
 # ===================================================
 def extract_maybank(pdf_path):
-    txns = []
+    transactions = []
     seen = set()
 
     def to_float(v):
@@ -37,8 +39,8 @@ def extract_maybank(pdf_path):
         for page in pdf.pages:
             text = page.extract_text() or ""
 
-            for line in text.split("\n"):
-                line = line.strip()
+            for raw_line in text.split("\n"):
+                line = raw_line.strip()
                 if not line:
                     continue
 
@@ -46,18 +48,18 @@ def extract_maybank(pdf_path):
                 if not m:
                     continue
 
-                date_raw, desc, amt, sign, bal = m.groups()
+                date_raw, desc, amount_raw, sign, balance_raw = m.groups()
 
                 if any(k in desc.lower() for k in SUMMARY_KEYWORDS):
                     continue
 
-                amount = to_float(amt)
-                balance = to_float(bal)
+                amount = to_float(amount_raw)
+                balance = to_float(balance_raw)
 
                 debit = amount if sign == "-" else 0.0
                 credit = amount if sign == "+" else 0.0
 
-                # 🔑 YEAR HANDLING (same as notebook but dynamic)
+                # Same logic as notebook (year fixed to statement year)
                 day, month = date_raw.split("/")
                 date = f"2025-{month}-{day}"
 
@@ -66,7 +68,7 @@ def extract_maybank(pdf_path):
                     continue
                 seen.add(key)
 
-                txns.append({
+                transactions.append({
                     "date": date,
                     "description": desc.strip(),
                     "debit": debit,
@@ -75,7 +77,7 @@ def extract_maybank(pdf_path):
                 })
 
     df = pd.DataFrame(
-        txns,
+        transactions,
         columns=["date", "description", "debit", "credit", "balance"]
     )
 
