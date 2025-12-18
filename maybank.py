@@ -4,126 +4,67 @@ import re
 from pathlib import Path
 
 # ===================================================
-# MAYBANK STREAMLIT-SAFE UNIVERSAL EXTRACTOR
-# (CWS + SME / LARNEY)
+# MAYBANK STREAMLIT SAFE EXTRACTOR (FIXED REGEX)
 # ===================================================
 
-# -------- DATE PATTERNS --------
-DATE_CWS = re.compile(r"^\d{2}\s+[A-Za-z]{3}\s+\d{4}")   # 01 Mar 2025
-DATE_SME = re.compile(r"^\d{2}/\d{2}")                  # 01/03
-
-# -------- AMOUNT + SIGN + BALANCE --------
-AMOUNT_PATTERN = re.compile(
-    r"([0-9,]+\.\d{2})\s*([+-])\s*([0-9,]+\.\d{2})"
+TXN_PATTERN = re.compile(
+    r"(\d{2}/\d{2})\s+"        # date: 01/06
+    r"(.+?)\s+"               # description
+    r"([0-9,]+\.\d{2})"       # amount
+    r"([+-])\s*"              # sign (CRITICAL FIX)
+    r"([0-9,]+\.\d{2})"       # balance
 )
 
 SUMMARY_KEYWORDS = [
     "opening balance", "closing balance",
     "brought forward", "carried forward",
-    "total debit", "total credit",
-    "ending balance"
+    "total debit", "total credit"
 ]
 
-# ===================================================
+
 def extract_maybank(pdf_path):
     txns = []
     seen = set()
 
     def to_float(v):
-        try:
-            return float(str(v).replace(",", "").strip())
-        except:
-            return 0.0
-
-    def is_summary(text):
-        t = text.lower()
-        return any(k in t for k in SUMMARY_KEYWORDS)
+        return float(str(v).replace(",", ""))
 
     with pdfplumber.open(pdf_path) as pdf:
         for page in pdf.pages:
-
             text = page.extract_text() or ""
-            lines = text.split("\n")
-
-            current = None
-            buffer_desc = []
-
-            for raw in lines:
-                line = raw.strip()
+            for line in text.split("\n"):
+                line = line.strip()
                 if not line:
                     continue
 
-                # -------------------------------
-                # 1️⃣ Detect new transaction line
-                # -------------------------------
-                is_cws = DATE_CWS.match(line)
-                is_sme = DATE_SME.match(line)
-
-                if not (is_cws or is_sme):
-                    if current:
-                        buffer_desc.append(line)
-                    continue
-
-                m = AMOUNT_PATTERN.search(line)
+                m = TXN_PATTERN.search(line)
                 if not m:
-                    if current:
-                        buffer_desc.append(line)
                     continue
 
-                # Save previous transaction
-                if current:
-                    current["description"] = " ".join(buffer_desc).strip()
-                    key = (
-                        current["date"],
-                        current["description"],
-                        current["debit"],
-                        current["credit"],
-                        current["balance"],
-                    )
-                    if key not in seen:
-                        seen.add(key)
-                        txns.append(current)
+                date, desc, amt, sign, bal = m.groups()
 
-                buffer_desc = []
+                if any(k in desc.lower() for k in SUMMARY_KEYWORDS):
+                    continue
 
-                amt = to_float(m.group(1))
-                sign = m.group(2)
-                bal = to_float(m.group(3))
+                amount = to_float(amt)
+                balance = to_float(bal)
 
-                debit = amt if sign == "-" else 0.0
-                credit = amt if sign == "+" else 0.0
+                debit = amount if sign == "-" else 0.0
+                credit = amount if sign == "+" else 0.0
 
-                date = line[:11] if is_cws else line[:5]
-                desc_text = line[:m.start()].strip()
+                key = (date, desc, debit, credit, balance)
+                if key in seen:
+                    continue
+                seen.add(key)
 
-                current = {
-                    "date": date.strip(),
-                    "description": "",
+                txns.append({
+                    "date": date,
+                    "description": desc.strip(),
                     "debit": debit,
                     "credit": credit,
-                    "balance": bal,
-                }
+                    "balance": balance
+                })
 
-                if desc_text:
-                    buffer_desc.append(desc_text)
-
-            # Save last txn on page
-            if current:
-                current["description"] = " ".join(buffer_desc).strip()
-                key = (
-                    current["date"],
-                    current["description"],
-                    current["debit"],
-                    current["credit"],
-                    current["balance"],
-                )
-                if key not in seen:
-                    seen.add(key)
-                    txns.append(current)
-
-    # ===================================================
-    # FINAL CLEANUP + ORDER FIX
-    # ===================================================
     df = pd.DataFrame(
         txns,
         columns=["date", "description", "debit", "credit", "balance"]
@@ -132,14 +73,8 @@ def extract_maybank(pdf_path):
     if df.empty:
         return df
 
-    df["__dt"] = pd.to_datetime(
-        df["date"],
-        dayfirst=True,
-        errors="coerce"
-    )
-
-    df = df.sort_values("__dt", ascending=True)
-    df = df.drop(columns="__dt").reset_index(drop=True)
+    df["__dt"] = pd.to_datetime(df["date"], dayfirst=True, errors="coerce")
+    df = df.sort_values("__dt").drop(columns="__dt").reset_index(drop=True)
 
     print(f"✔ MAYBANK extracted {len(df)} transactions from {Path(pdf_path).name}")
     return df
