@@ -7,3 +7,4 @@ tabulate
 pandas
 openpyxl
 pymupdf
+opencv-python-headless
