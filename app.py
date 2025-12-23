@@ -22,13 +22,16 @@ st.set_page_config(
 st.title("🏦 Bank Statement Analysis")
 
 # =====================================================
-# SESSION STATE (CRITICAL – SAME AS YOUR FRIEND)
+# SESSION STATE (CRITICAL)
 # =====================================================
 if "status" not in st.session_state:
     st.session_state.status = "idle"
 
 if "df_all" not in st.session_state:
     st.session_state.df_all = None
+
+if "run_clicked" not in st.session_state:
+    st.session_state.run_clicked = False
 
 # =====================================================
 # BANK SELECTION
@@ -55,9 +58,9 @@ uploaded_files = st.file_uploader(
     accept_multiple_files=True
 )
 
-# Sort files by name (same as friend)
 if uploaded_files:
     uploaded_files = sorted(uploaded_files, key=lambda x: x.name)
+    st.session_state.uploaded_count = len(uploaded_files)
 
 # =====================================================
 # OD LIMIT INPUT
@@ -69,26 +72,28 @@ OD_LIMIT = st.number_input(
 )
 
 # =====================================================
-# RUN / RESET BUTTONS (THIS IS THE KEY)
+# RUN / RESET BUTTONS
 # =====================================================
 col1, col2 = st.columns(2)
 
 with col1:
-    if st.button("▶ Run Analysis"):
+    if st.button("▶ Run Analysis", use_container_width=True):
         st.session_state.status = "running"
+        st.session_state.run_clicked = True
 
 with col2:
-    if st.button("🔄 Reset"):
+    if st.button("🔄 Reset", use_container_width=True):
         st.session_state.status = "idle"
         st.session_state.df_all = None
+        st.session_state.run_clicked = False
         st.rerun()
 
 st.markdown(f"### ⚙️ Status: **{st.session_state.status.upper()}**")
 
 # =====================================================
-# EXTRACTION (ONLY WHEN RUNNING)
+# EXTRACTION (RUNS ONLY ON BUTTON CLICK)
 # =====================================================
-if uploaded_files and st.session_state.status == "running":
+if uploaded_files and st.session_state.run_clicked:
 
     extractor = BANK_EXTRACTORS[bank_choice]
     all_dfs = []
@@ -117,13 +122,18 @@ if uploaded_files and st.session_state.status == "running":
                 all_dfs.append(df)
 
     if not all_dfs:
-        st.error("No transactions extracted.")
+        st.error("❌ No transactions extracted.")
+        st.session_state.status = "idle"
     else:
         st.session_state.df_all = pd.concat(all_dfs, ignore_index=True)
-        st.success("Extraction completed.")
+        st.session_state.status = "completed"
+        st.success("✅ Extraction completed successfully.")
+
+    # IMPORTANT: stop reruns
+    st.session_state.run_clicked = False
 
 # =====================================================
-# SHOW TRANSACTIONS & ANALYSIS
+# DISPLAY TRANSACTIONS & ANALYSIS
 # =====================================================
 if st.session_state.df_all is not None:
 
@@ -132,9 +142,9 @@ if st.session_state.df_all is not None:
     st.subheader("📄 Cleaned Transaction List (Chronological)")
     st.dataframe(df_all, use_container_width=True)
 
-    # -------------------------------
-    # Helper functions
-    # -------------------------------
+    # -------------------------------------------------
+    # Helper Functions (UNCHANGED LOGIC)
+    # -------------------------------------------------
     def split_by_month(df):
         temp = df.copy()
         temp["_dt"] = pd.to_datetime(temp["date"], dayfirst=True, errors="coerce")
@@ -191,9 +201,9 @@ if st.session_state.df_all is not None:
 
         return pd.DataFrame(rows)
 
-    # -------------------------------
-    # Monthly Summary
-    # -------------------------------
+    # -------------------------------------------------
+    # MONTHLY SUMMARY (OUTPUT UNCHANGED)
+    # -------------------------------------------------
     months = split_by_month(df_all)
 
     st.subheader("📅 Monthly Summary")
