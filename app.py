@@ -249,3 +249,24 @@ if st.button("Run Analysis", type="primary"):
 
     st.subheader("📊 Financial Ratios")
     st.dataframe(ratio_df, use_container_width=True)
+
+def df_to_txt(df, month_label):
+    lines = []
+    lines.append(f"Month: {month_label}")
+    lines.append("-" * 100)
+    lines.append(
+        f"{'Date':<12} | {'Description':<45} | {'Debit':>12} | {'Credit':>12} | {'Balance':>14}"
+    )
+    lines.append("-" * 100)
+
+    for _, row in df.iterrows():
+        lines.append(
+            f"{str(row['date']):<12} | "
+            f"{str(row['description'])[:45]:<45} | "
+            f"{row['debit']:>12.2f} | "
+            f"{row['credit']:>12.2f} | "
+            f"{row['balance']:>14.2f}"
+        )
+
+    lines.append("-" * 100)
+    return "\n".join(lines)
