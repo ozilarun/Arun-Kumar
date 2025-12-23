@@ -1,242 +1,285 @@
 import streamlit as st
 import tempfile
 import pandas as pd
+import pdfplumber
+import fitz  # PyMuPDF
+import re
+from datetime import datetime
 
 # =====================================================
-# BANK IMPORTS
+# EXTERNAL BANK IMPORTS (Safe Imports)
 # =====================================================
-# Make sure you have these files in the same folder
-from bank_rakyat import extract_bank_rakyat
-from bank_islam import extract_bank_islam
-from cimb import extract_cimb
-from maybank import extract_maybank
-from rhb import extract_rhb
+try:
+    from bank_rakyat import extract_bank_rakyat
+    from bank_islam import extract_bank_islam
+    from cimb import extract_cimb
+    from rhb import extract_rhb
+except ImportError:
+    # Dummy functions to prevent crash if files missing
+    def extract_bank_rakyat(f): return pd.DataFrame()
+    def extract_bank_islam(f): return pd.DataFrame()
+    def extract_cimb(f): return pd.DataFrame()
+    def extract_rhb(f): return pd.DataFrame()
 
 # =====================================================
-# PAGE CONFIG
+# UNIVERSAL MAYBANK PARSER (Embedded for Safety)
 # =====================================================
-st.set_page_config(
-    page_title="Bank Statement Analysis",
-    layout="wide"
-)
+def extract_maybank_universal(pdf_path):
+    # 1. Try CWS Strategy (Text/Regex)
+    try:
+        df = _parse_maybank_cws(pdf_path)
+        if df is not None and not df.empty: return df
+    except: pass
+    
+    # 2. Try Mytutor Strategy (Coordinates)
+    try:
+        df = _parse_maybank_mytutor(pdf_path)
+        if df is not None and not df.empty: return df
+    except: pass
+    
+    return pd.DataFrame()
 
-st.title("🏦 Bank Statement Analysis")
+def _parse_maybank_cws(pdf_path):
+    DATE_PATTERN = re.compile(r"^\d{2}\s+[A-Za-z]{3}\s+\d{4}") 
+    AMOUNT_PATTERN = re.compile(r'([0-9,]+\.\d{2})\s*([+-])\s*([0-9,]+\.\d{2})')
+    transactions = []
+    current_txn = None
+    desc_buffer = []
+
+    with pdfplumber.open(pdf_path) as pdf:
+        for page in pdf.pages:
+            text = page.extract_text() or ""
+            for line in text.split("\n"):
+                line = line.strip()
+                if not line: continue
+                if DATE_PATTERN.match(line):
+                    if current_txn:
+                        current_txn["description"] = " ".join(desc_buffer).strip()
+                        transactions.append(current_txn)
+                    desc_buffer = []
+                    m = AMOUNT_PATTERN.search(line)
+                    if not m: current_txn = None; continue
+                    
+                    amt = float(m.group(1).replace(",", ""))
+                    sign = m.group(2)
+                    bal = float(m.group(3).replace(",", ""))
+                    debit, credit = (amt, 0.0) if sign == "-" else (0.0, amt)
+                    
+                    current_txn = {"date": line[:11], "description": "", "debit": debit, "credit": credit, "balance": bal}
+                    desc_buffer.append(line[:m.start()].strip())
+                else:
+                    if current_txn: desc_buffer.append(line)
+    if current_txn:
+        current_txn["description"] = " ".join(desc_buffer).strip()
+        transactions.append(current_txn)
+    
+    df = pd.DataFrame(transactions)
+    if not df.empty:
+        df["date"] = pd.to_datetime(df["date"], format="%d %b %Y", errors='coerce').dt.strftime('%d/%m/%Y')
+    return df
+
+def _parse_maybank_mytutor(pdf_path):
+    doc = fitz.open(pdf_path)
+    statement_year = str(datetime.now().year)
+    for p in range(min(2, len(doc))):
+        txt = doc[p].get_text("text").upper()
+        m = re.search(r"STATEMENT\s+DATE\s*:?\s*(\d{2})/(\d{2})/(\d{2})", txt)
+        if m: statement_year = f"20{m.group(3)}"
+
+    transactions = []
+    prev_bal = None
+    DATE_RE = re.compile(r"^(\d{2}/\d{2}/\d{4}|\d{2}/\d{2})$")
+    
+    for page in doc:
+        words = page.get_text("words")
+        rows = [{"x": w[0], "y": w[1], "text": str(w[4]).strip()} for w in words]
+        rows.sort(key=lambda x: (round(x["y"], 1), x["x"]))
+        processed_y = set()
+        
+        for r in rows:
+            if round(r["y"], 1) in processed_y: continue
+            if not DATE_RE.match(r["text"]): continue
+            
+            line_y = round(r["y"], 1)
+            line_items = [w for w in rows if abs(round(w["y"],1) - line_y) < 2]
+            line_items.sort(key=lambda w: w["x"])
+            
+            amounts = []
+            desc_parts = []
+            for item in line_items:
+                if item["text"] == r["text"]: continue
+                clean = item["text"].replace(",","").replace("CR","").replace("DR","")
+                if re.match(r"^\d+\.\d{2}[+-]?$", clean):
+                    amounts.append({"val": clean, "x": item["x"]})
+                else:
+                    desc_parts.append(item["text"])
+            
+            if not amounts: continue
+            processed_y.add(line_y)
+            
+            bal_str = amounts[-1]["val"]
+            bal = float(bal_str.rstrip("+-"))
+            debit, credit = 0.0, 0.0
+            
+            if len(amounts) > 1:
+                txn_str = amounts[-2]["val"]
+                val = float(txn_str.rstrip("+-"))
+                if txn_str.endswith("-"): debit = val
+                elif txn_str.endswith("+"): credit = val
+                elif prev_bal and round(prev_bal - val, 2) == bal: debit = val
+                else: credit = val
+            elif prev_bal is not None:
+                diff = round(bal - prev_bal, 2)
+                if diff < 0: debit = abs(diff)
+                else: credit = diff
+            
+            date_str = r["text"]
+            if len(date_str) == 5: date_str += f"/{statement_year}"
+            
+            transactions.append({
+                "date": date_str, "description": " ".join(desc_parts), 
+                "debit": debit, "credit": credit, "balance": bal
+            })
+            prev_bal = bal
+    return pd.DataFrame(transactions)
 
 # =====================================================
-# 1. SIDEBAR / INPUTS
+# STREAMLIT APP CONFIGURATION
 # =====================================================
+st.set_page_config(page_title="Bank Statement Parser", layout="wide")
+st.title("📄 Bank Statement Parser")
+
+# --- SESSION STATE INITIALIZATION ---
+if "data_extracted" not in st.session_state:
+    st.session_state.data_extracted = None
+
+# --- SIDEBAR SETTINGS ---
 st.sidebar.header("Settings")
+bank_choice = st.sidebar.selectbox("Select Bank Format", ["Maybank", "CIMB", "Bank Rakyat", "Bank Islam", "RHB"])
+od_limit = st.sidebar.number_input("OD Limit (RM)", min_value=0.0, step=1000.0)
 
-# Bank Selection
-bank_choice = st.sidebar.selectbox(
-    "Select Bank",
-    ["Bank Rakyat", "Bank Islam", "CIMB", "Maybank", "RHB"]
-)
-
-# OD Limit Input
-OD_LIMIT = st.sidebar.number_input(
-    "Enter OD Limit (RM)",
-    min_value=0.0,
-    step=1000.0,
-    value=0.0
-)
-
-BANK_EXTRACTORS = {
+# Map Extractors
+EXTRACTORS = {
+    "Maybank": extract_maybank_universal,
+    "CIMB": extract_cimb,
     "Bank Rakyat": extract_bank_rakyat,
     "Bank Islam": extract_bank_islam,
-    "CIMB": extract_cimb,
-    "Maybank": extract_maybank,
     "RHB": extract_rhb,
 }
 
 # =====================================================
-# 2. FILE UPLOAD & EXTRACTION (Happens Immediately)
+# 1. FILE UPLOAD
 # =====================================================
-uploaded_files = st.file_uploader(
-    f"Upload {bank_choice} Statement PDF(s)",
-    type=["pdf"],
-    accept_multiple_files=True
-)
+uploaded_files = st.file_uploader("Upload PDF Files", type=["pdf"], accept_multiple_files=True)
 
-if not uploaded_files:
-    st.info("👋 Please upload a PDF to begin.")
-    st.stop()
-
-# --- PROCESSING ---
-extractor = BANK_EXTRACTORS[bank_choice]
-all_dfs = []
-
-st.write("---")
-with st.spinner(f"Extracting data from {len(uploaded_files)} files..."):
-    for uploaded_file in uploaded_files:
-        # Save temp file
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
-            tmp.write(uploaded_file.read())
-            pdf_path = tmp.name
-
-        try:
-            # Run Extractor
-            df = extractor(pdf_path)
-
-            if df is not None and not df.empty:
-                # -----------------------------------------------------------
-                # AUTO-SORT LOGIC (Fix for Maybank Personal vs Business)
-                # -----------------------------------------------------------
-                try:
-                    # Create temp date for sorting
-                    df["_sort_temp"] = pd.to_datetime(df["date"], dayfirst=True, errors='coerce')
-                    # Force sort: Oldest -> Newest
-                    df = df.sort_values(by="_sort_temp", ascending=True)
-                    # Clean up
-                    df = df.drop(columns=["_sort_temp"]).reset_index(drop=True)
-                except Exception:
-                    pass 
+# =====================================================
+# 2. RUN ANALYSIS BUTTON
+# =====================================================
+# This button triggers the processing and saves to session state
+if st.button("▶️ RUN ANALYSIS", type="primary"):
+    
+    if not uploaded_files:
+        st.error("Please upload at least one PDF file.")
+    else:
+        all_tx = []
+        extractor = EXTRACTORS[bank_choice]
+        progress_bar = st.progress(0)
+        
+        for i, uploaded_file in enumerate(uploaded_files):
+            # Save temp file
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
+                tmp.write(uploaded_file.read())
+                pdf_path = tmp.name
+            
+            try:
+                # Extract
+                df = extractor(pdf_path)
                 
-                all_dfs.append(df)
-            else:
-                st.warning(f"⚠️ No transactions found in {uploaded_file.name}")
-
-        except Exception as e:
-            st.error(f"❌ Error parsing {uploaded_file.name}: {e}")
-
-if not all_dfs:
-    st.error("No valid data extracted. Please check your files.")
-    st.stop()
-
-# Combine all extracted data
-df_all = pd.concat(all_dfs, ignore_index=True)
-
-# Show the raw data first (Verification)
-st.subheader(f"✅ Extracted Transactions ({len(df_all)} rows)")
-st.dataframe(df_all, use_container_width=True, height=300)
-
-# =====================================================
-# 3. ANALYSIS LOGIC (Hidden until Button Click)
-# =====================================================
-
-def compute_opening_balance_from_row(row):
-    # Backward calculation: Prev = Curr - Credit + Debit
-    return row["balance"] - row["credit"] + row["debit"]
-
-def split_by_month(df):
-    temp = df.copy()
-    temp["_dt"] = pd.to_datetime(temp["date"], dayfirst=True, errors='coerce')
-    temp = temp.dropna(subset=["_dt"])
-
-    month_order = (
-        temp.assign(m=temp["_dt"].dt.to_period("M"))
-        .groupby("m")["_dt"].min().sort_values().index
-    )
-
-    months = {}
-    for m in month_order:
-        label = m.strftime("%b %Y")
-        months[label] = (
-            temp[temp["_dt"].dt.to_period("M") == m]
-            .drop(columns="_dt")
-            .reset_index(drop=True)
-        )
-    return months
-
-def compute_monthly_summary(all_months, od_limit):
-    rows = []
-    prev_ending = None
-
-    for month, df in all_months.items():
-        if df.empty: continue
-        
-        # Data is already sorted Oldest -> Newest
-        first_txn = df.iloc[0]
-        last_txn = df.iloc[-1]
-
-        if prev_ending is None:
-            opening = compute_opening_balance_from_row(first_txn)
+                if df is not None and not df.empty:
+                    # Auto-Sort (Chronological)
+                    try:
+                        df["_sort"] = pd.to_datetime(df["date"], dayfirst=True, errors='coerce')
+                        df = df.sort_values("_sort").drop(columns=["_sort"]).reset_index(drop=True)
+                    except: pass
+                    
+                    all_tx.append(df)
+            except Exception as e:
+                st.error(f"Error reading {uploaded_file.name}: {e}")
+            
+            progress_bar.progress((i + 1) / len(uploaded_files))
+            
+        if all_tx:
+            # SAVE TO SESSION STATE
+            st.session_state.data_extracted = pd.concat(all_tx, ignore_index=True)
+            st.success(f"✅ Successfully extracted {len(st.session_state.data_extracted)} transactions!")
         else:
-            opening = prev_ending
+            st.warning("⚠️ No transactions found.")
 
-        ending = last_txn["balance"]
+# =====================================================
+# 3. DISPLAY RESULTS (FROM SESSION STATE)
+# =====================================================
+if st.session_state.data_extracted is not None:
+    df_all = st.session_state.data_extracted
+    
+    st.divider()
+    
+    # --- A. Transaction Table ---
+    st.subheader("📊 Extracted Transactions")
+    st.dataframe(df_all, use_container_width=True, height=300)
+    
+    # --- B. Monthly Calculations ---
+    def get_monthly_summary(df):
+        df = df.copy()
+        df["_dt"] = pd.to_datetime(df["date"], dayfirst=True, errors='coerce')
+        df = df.dropna(subset=["_dt"])
         
-        # Stats
-        debit = df["debit"].sum()
-        credit = df["credit"].sum()
-        highest = df["balance"].max()
-        lowest = df["balance"].min()
-        swing = abs(highest - lowest)
+        summary = []
+        prev_end = None
+        
+        # Group by Month
+        for period, group in df.groupby(df["_dt"].dt.to_period("M")):
+            first, last = group.iloc[0], group.iloc[-1]
+            
+            # Opening Balance Logic
+            opening = (first["balance"] - first["credit"] + first["debit"]) if prev_end is None else prev_end
+            ending = last["balance"]
+            
+            od_util = abs(ending) if (od_limit > 0 and ending < 0) else 0
+            
+            summary.append({
+                "Month": period.strftime("%b %Y"),
+                "Opening": opening,
+                "Debit": group["debit"].sum(),
+                "Credit": group["credit"].sum(),
+                "Ending": ending,
+                "Highest": group["balance"].max(),
+                "Lowest": group["balance"].min(),
+                "Swing": group["balance"].max() - group["balance"].min(),
+                "OD Util": od_util
+            })
+            prev_end = ending
+            
+        return pd.DataFrame(summary)
 
-        # OD Logic
-        if od_limit > 0 and ending < 0:
-            od_util = abs(ending)
-            od_pct = (od_util / od_limit) * 100
-        else:
-            od_util = 0
-            od_pct = 0
-
-        rows.append({
-            "Month": month,
-            "Opening": opening,
-            "Debit": debit,
-            "Credit": credit,
-            "Ending": ending,
-            "Highest": highest,
-            "Lowest": lowest,
-            "Swing": swing,
-            "OD Util (RM)": od_util,
-            "OD %": od_pct
-        })
-        prev_ending = ending
-
-    return pd.DataFrame(rows)
-
-def compute_ratios(summary, od_limit):
-    df = summary.copy()
-    if df.empty: return pd.DataFrame()
+    # Calculate Summary
+    summary_df = get_monthly_summary(df_all)
     
-    # Simple Ratio Table
-    metrics = [
-        ("Total Credit (All Months)", df["Credit"].sum()),
-        ("Total Debit (All Months)", df["Debit"].sum()),
-        ("Average Opening Balance", df["Opening"].mean()),
-        ("Average Ending Balance", df["Ending"].mean()),
-        ("Highest Balance (Period)", df["Highest"].max()),
-        ("Lowest Balance (Period)", df["Lowest"].min()),
-        ("Average Monthly Swing", df["Swing"].mean()),
-    ]
-    
-    if od_limit > 0:
-        metrics.append(("Average OD Utilization (RM)", df["OD Util (RM)"].mean()))
-        metrics.append(("Average OD Utilization (%)", df["OD %"].mean()))
-        metrics.append(("Number of Excesses", int((df["OD Util (RM)"] > od_limit).sum())))
-
-    return pd.DataFrame(metrics, columns=["Metric", "Value"])
-
-# =====================================================
-# 4. RUN ANALYSIS BUTTON
-# =====================================================
-st.write("---")
-col1, col2, col3 = st.columns([1, 2, 1])
-
-with col2:
-    # PRIMARY BUTTON (Blue)
-    run_btn = st.button("🚀 RUN ANALYSIS", type="primary", use_container_width=True)
-
-if run_btn:
-    st.success("Running Analysis...")
-    
-    # A. Split Data
-    months = split_by_month(df_all)
-    
-    # B. Compute Summary
-    summary_df = compute_monthly_summary(months, OD_LIMIT)
-    ratio_df = compute_ratios(summary_df, OD_LIMIT)
-
-    # C. Display Results
+    # --- C. Display Summary ---
     st.subheader("📅 Monthly Summary")
     st.dataframe(summary_df, use_container_width=True)
+    
+    # --- D. Key Metrics ---
+    if not summary_df.empty:
+        col1, col2, col3 = st.columns(3)
+        col1.metric("Total Credits", f"{summary_df['Credit'].sum():,.2f}")
+        col2.metric("Total Debits", f"{summary_df['Debit'].sum():,.2f}")
+        col3.metric("Avg Ending Balance", f"{summary_df['Ending'].mean():,.2f}")
 
-    st.subheader("📊 Financial Ratios")
-    st.dataframe(ratio_df, use_container_width=True)
-
-    st.subheader("📂 Monthly Audit (Details)")
-    for month, mdf in months.items():
-        with st.expander(f"Show {month} Transactions"):
-            st.dataframe(mdf, use_container_width=True)
+    # --- E. Download Button ---
+    csv = df_all.to_csv(index=False).encode('utf-8')
+    st.download_button(
+        label="⬇️ Download CSV",
+        data=csv,
+        file_name='transactions.csv',
+        mime='text/csv',
+    )
