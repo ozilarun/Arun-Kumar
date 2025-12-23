@@ -57,7 +57,7 @@ uploaded_files = st.file_uploader(
 )
 
 # =====================================================
-# OD LIMIT INPUT (BEFORE RUN)
+# OD LIMIT INPUT
 # =====================================================
 OD_LIMIT = st.number_input(
     "Enter OD Limit (RM)",
@@ -66,17 +66,24 @@ OD_LIMIT = st.number_input(
 )
 
 # =====================================================
-# RUN BUTTON
+# RUN BUTTON (ONLY BUTTON)
 # =====================================================
 if st.button("▶ Run Analysis"):
     st.session_state.run_analysis = True
 
-# Stop everything until user clicks Run
-if not uploaded_files or not st.session_state.run_analysis:
+# =====================================================
+# GATING LOGIC (IMPORTANT)
+# =====================================================
+if not uploaded_files:
+    st.info("Please upload bank statement PDF(s).")
+    st.stop()
+
+if not st.session_state.run_analysis:
+    st.info("Click ▶ Run Analysis to start processing.")
     st.stop()
 
 # =====================================================
-# EXTRACTION (NOW CONTROLLED BY BUTTON)
+# EXTRACTION
 # =====================================================
 extractor = BANK_EXTRACTORS[bank_choice]
 all_dfs = []
@@ -108,7 +115,7 @@ if not all_dfs:
 df_all = pd.concat(all_dfs, ignore_index=True)
 
 # =====================================================
-# SHOW CLEANED TRANSACTIONS
+# SHOW TRANSACTIONS
 # =====================================================
 st.subheader("📄 Cleaned Transaction List (Normalized Chronological Order)")
 st.dataframe(df_all, use_container_width=True)
