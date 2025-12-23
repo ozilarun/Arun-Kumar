@@ -64,18 +64,19 @@ OD_LIMIT = st.number_input(
     min_value=0.0,
     step=1000.0
 )
+# =====================================================
+# RUN BUTTON (MUST BE BEFORE ANY st.stop)
+# =====================================================
+st.markdown("###")
 
-# =====================================================
-# RUN BUTTON (ONLY BUTTON)
-# =====================================================
 if st.button("▶ Run Analysis"):
     st.session_state.run_analysis = True
 
 # =====================================================
-# GATING LOGIC (IMPORTANT)
+# GATING LOGIC (AFTER BUTTON IS RENDERED)
 # =====================================================
 if not uploaded_files:
-    st.info("Please upload bank statement PDF(s).")
+    st.warning("Upload bank statement PDF(s) first.")
     st.stop()
 
 if not st.session_state.run_analysis:
