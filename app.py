@@ -7,7 +7,7 @@ from openpyxl.styles import Font, PatternFill, Border, Side
 from openpyxl.utils.dataframe import dataframe_to_rows
 
 # =====================================================
-# BANK IMPORTS (DO NOT TOUCH)
+# BANK IMPORTS
 # =====================================================
 from bank_rakyat import extract_bank_rakyat
 from bank_islam import extract_bank_islam
@@ -54,28 +54,48 @@ if not uploaded_files:
     st.stop()
 
 # =====================================================
-# EXTRACTION
+# EXTRACTION PROCESS
 # =====================================================
 extractor = BANK_EXTRACTORS[bank_choice]
 all_dfs = []
 
 for uploaded_file in uploaded_files:
+    # Save to temp file for processing
     with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
         tmp.write(uploaded_file.read())
         pdf_path = tmp.name
 
+    # Run the specific bank extractor
     df = extractor(pdf_path)
 
     if df is not None and not df.empty:
+        # -------------------------------------------------------------
+        # ⚡ SMART SORT LOGIC (CRITICAL FOR UNIVERSAL MAYBANK)
+        # -------------------------------------------------------------
+        # Some statements are Oldest->Newest (CWS), others Newest->Oldest (Personal).
+        # We must normalize everything to Oldest->Newest (Chronological) 
+        # so the opening balance math works correctly later.
+        try:
+            # Create a temp date column for sorting check
+            temp_dates = pd.to_datetime(df["date"], dayfirst=True, errors='coerce')
+            
+            # If we have data and the FIRST date is NEWER than LAST date...
+            if len(df) > 1 and temp_dates.iloc[0] > temp_dates.iloc[-1]:
+                # ...It is Reverse Chronological. Flip it!
+                df = df.iloc[::-1].reset_index(drop=True)
+        except Exception as e:
+            pass # If date parsing fails here, leave order as is
+
         all_dfs.append(df)
 
 if not all_dfs:
-    st.error("No transactions extracted.")
+    st.error("No transactions extracted. Please check the PDF format.")
     st.stop()
 
+# Combine all statements
 df_all = pd.concat(all_dfs, ignore_index=True)
 
-st.subheader("📄 Cleaned Transaction List (Original Order)")
+st.subheader("📄 Cleaned Transaction List (Normalized Chronological Order)")
 st.dataframe(df_all, use_container_width=True)
 
 # =====================================================
@@ -88,15 +108,23 @@ OD_LIMIT = st.number_input(
 )
 
 # =====================================================
-# HELPER FUNCTIONS
+# HELPER FUNCTIONS (MATH)
 # =====================================================
 def compute_opening_balance_from_row(row):
+    # Logic: Previous Balance = Current Balance + Debit - Credit
+    # (Because Current Balance = Prev - Debit + Credit) -> Wait, usually:
+    # Bal = Prev + Credit - Debit. 
+    # So Prev = Bal - Credit + Debit.
     return row["balance"] + row["debit"] - row["credit"]
 
 
 def split_by_month(df):
     temp = df.copy()
-    temp["_dt"] = pd.to_datetime(temp["date"], dayfirst=True)
+    # Convert date for grouping
+    temp["_dt"] = pd.to_datetime(temp["date"], dayfirst=True, errors='coerce')
+    
+    # Drop rows where date failed to parse
+    temp = temp.dropna(subset=["_dt"])
 
     month_order = (
         temp.assign(m=temp["_dt"].dt.to_period("M"))
@@ -123,19 +151,21 @@ def compute_monthly_summary(all_months, od_limit, bank_name):
     prev_ending = None
 
     for month, df in all_months.items():
+        if df.empty: continue
 
-        # CIMB is reverse-ordered
-        if bank_name == "CIMB":
-            first_txn = df.iloc[-1]   # earliest
-            last_txn = df.iloc[0]     # latest
-        else:
-            first_txn = df.iloc[0]
-            last_txn = df.iloc[-1]
+        # Because we FLIPPED everything to Chronological earlier,
+        # First row = Start of Month, Last row = End of Month.
+        # (We no longer need the specific CIMB check if we normalize everything)
+        
+        first_txn = df.iloc[0]
+        last_txn = df.iloc[-1]
 
-        # Opening balance
+        # Opening balance logic
         if prev_ending is None:
+            # First month: Calculate backwards from the first transaction
             opening = compute_opening_balance_from_row(first_txn)
         else:
+            # Subsequent months: Carry over from previous
             opening = prev_ending
 
         ending = last_txn["balance"]
@@ -173,6 +203,7 @@ def compute_monthly_summary(all_months, od_limit, bank_name):
 
 def compute_ratios(summary, od_limit):
     df = summary.copy()
+    if df.empty: return pd.DataFrame()
 
     return pd.DataFrame(
         [
@@ -188,7 +219,7 @@ def compute_ratios(summary, od_limit):
             ("Average % OD Utilization", df["OD %"].mean() if od_limit > 0 else 0),
             ("Average Monthly Swing (RM)", df["Swing"].mean()),
             ("% of Swing", (df["Swing"].mean() / od_limit * 100) if od_limit > 0 else 0),
-            ("Returned Cheques", 0),
+            ("Returned Cheques", 0), # Placeholder
             ("Number of Excesses", int((df["OD Util (RM)"] > od_limit).sum()) if od_limit > 0 else 0),
         ],
         columns=["Metric", "Value"]
