@@ -1,207 +1,167 @@
+# =====================================================
+# RHB.PY – UNIFIED & STREAMLIT SAFE
+# =====================================================
+
+import re
 import pdfplumber
-import pytesseract
-from PIL import Image
-import regex as re
 import pandas as pd
-import os
+from datetime import datetime
 
-from openpyxl import Workbook
-from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
-from openpyxl.utils.dataframe import dataframe_to_rows
-
-
-# ===================================================
-# OCR TEMP DIR
-# ===================================================
-
-TEMP_DIR = "temp_ocr_images"
-os.makedirs(TEMP_DIR, exist_ok=True)
+# OCR fallback (used ONLY if needed)
+try:
+    import pytesseract
+    from PIL import Image
+except Exception:
+    pytesseract = None
 
 
-# ===================================================
-# HELPERS
-# ===================================================
+# =====================================================
+# 1️⃣ DIGITAL RHB PARSER (PRIMARY – pdfplumber)
+# Preserves original balance-math logic
+# =====================================================
 
-def num(x):
-    try:
-        x = str(x).replace(",", "").strip()
-        if x.endswith("-"):
-            return -float(x[:-1])
-        if x.endswith("+"):
-            return float(x[:-1])
-        return float(x)
-    except:
-        return 0.0
+TX_LINE_PATTERN = re.compile(
+    r"^\s*(\d{1,2})\s*([A-Za-z]{3})\s+(.*?)\s+([0-9,]+\.\d{2})\s+([0-9,]+\.\d{2})\s*$"
+)
+
+def _extract_rhb_digital(pdf_path):
+    transactions = []
+    prev_balance = None
+
+    # Infer year from filename, fallback = current year
+    year_match = re.search(r"20\d{2}", pdf_path)
+    year = year_match.group(0) if year_match else str(datetime.now().year)
+
+    with pdfplumber.open(pdf_path) as pdf:
+        for page in pdf.pages:
+            text = page.extract_text()
+            if not text:
+                continue
+
+            for line in text.split("\n"):
+                match = TX_LINE_PATTERN.match(line)
+                if not match:
+                    continue
+
+                day, month, desc, amount_str, bal_str = match.groups()
+
+                amount = float(amount_str.replace(",", ""))
+                curr_balance = float(bal_str.replace(",", ""))
+
+                is_credit = False
+                is_debit = False
+
+                # 🔑 Balance-difference logic (UNCHANGED)
+                if prev_balance is not None:
+                    if abs((prev_balance + amount) - curr_balance) < 0.05:
+                        is_credit = True
+                    elif abs((prev_balance - amount) - curr_balance) < 0.05:
+                        is_debit = True
+
+                # Fallback keywords
+                if not is_credit and not is_debit:
+                    if any(k in desc.upper() for k in ["CR", "DEPOSIT", "INWARD", "HIBAH", "PROFIT"]):
+                        is_credit = True
+                    else:
+                        is_debit = True
+
+                transactions.append({
+                    "date": f"{day} {month} {year}",
+                    "description": desc.strip(),
+                    "debit": amount if is_debit else 0.0,
+                    "credit": amount if is_credit else 0.0,
+                    "balance": curr_balance
+                })
+
+                prev_balance = curr_balance
+
+    return pd.DataFrame(transactions)
 
 
-def extract_text(page, page_num):
-    text = page.extract_text()
-    if text and text.strip():
-        return text
+# =====================================================
+# 2️⃣ OCR FALLBACK PARSER (SCANNED PDFs)
+# =====================================================
 
-    img_path = f"{TEMP_DIR}/page_{page_num}.png"
-    page.to_image(resolution=300).save(img_path)
-    return pytesseract.image_to_string(Image.open(img_path))
-
-
-def preprocess_rhb_text(text):
-    lines = text.split("\n")
-    merged, buffer = [], ""
-
-    for line in lines:
-        line = line.strip()
-        if re.match(r"^\d{2}-\d{2}-\d{4}", line):
-            if buffer:
-                merged.append(buffer.strip())
-            buffer = line
-        else:
-            buffer += " " + line
-
-    if buffer:
-        merged.append(buffer.strip())
-
-    return "\n".join(merged)
-
-
-# ===================================================
-# TRANSACTION REGEX (YOUR LOGIC)
-# ===================================================
-
-txn_pattern = re.compile(
+OCR_TX_PATTERN = re.compile(
     r"""
-    (?P<date>\d{2}-\d{2}-\d{4})\s+
-    (?P<body>.*?)\s+
+    (?P<date>\d{2}-\d{2}-\d{4})
+    \s+
+    (?P<body>.*?)
+    \s+
     (?P<dr>[0-9,]*\.\d{2})?\s*(?P<dr_flag>-)?\s*
-    (?P<cr>[0-9,]*\.\d{2})?\s+
+    (?P<cr>[0-9,]*\.\d{2})?
+    \s+
     (?P<bal>-?[0-9,]*\.\d{2}[+-]?)
     """,
     re.VERBOSE | re.DOTALL
 )
 
+def _extract_rhb_ocr(pdf_path):
+    if pytesseract is None:
+        return pd.DataFrame()
 
-# ===================================================
-# 1️⃣ EXTRACTION ENTRY (STREAMLIT)
-# ===================================================
-
-def extract_rhb(pdf_path):
-    txns = []
+    transactions = []
 
     with pdfplumber.open(pdf_path) as pdf:
         for page_num, page in enumerate(pdf.pages, start=1):
-            raw = extract_text(page, page_num)
-            processed = preprocess_rhb_text(raw)
 
-            for m in txn_pattern.finditer(processed):
-                txns.append({
+            text = page.extract_text()
+            if not text or not text.strip():
+                img = page.to_image(resolution=300)
+                text = pytesseract.image_to_string(img.original)
+
+            if not text:
+                continue
+
+            for m in OCR_TX_PATTERN.finditer(text):
+                dr = m.group("dr")
+                cr = m.group("cr")
+                bal = m.group("bal")
+
+                transactions.append({
                     "date": m.group("date"),
                     "description": m.group("body").strip(),
-                    "debit": num(m.group("dr")) if m.group("dr") else 0.0,
-                    "credit": num(m.group("cr")) if m.group("cr") else 0.0,
-                    "balance": num(m.group("bal")),
+                    "debit": float(dr.replace(",", "")) if dr else 0.0,
+                    "credit": float(cr.replace(",", "")) if cr else 0.0,
+                    "balance": float(
+                        bal.replace(",", "").replace("+", "").replace("-", "")
+                    )
                 })
 
-    return pd.DataFrame(txns, columns=[
-        "date", "description", "debit", "credit", "balance"
-    ])
+    return pd.DataFrame(transactions)
 
 
-# ===================================================
-# 2️⃣ OPENING BALANCE
-# ===================================================
+# =====================================================
+# 3️⃣ PUBLIC FUNCTION (USED BY app.py)
+# =====================================================
 
-def compute_opening_balance(df):
-    first = df.iloc[0]
-    return first["balance"] + first["debit"] - first["credit"]
+def extract_rhb(pdf_path):
+    """
+    Streamlit-safe RHB extractor.
+    Strategy:
+    1. Try digital pdfplumber parser
+    2. If empty → OCR fallback
+    Output columns:
+    date | description | debit | credit | balance
+    """
 
+    # 1️⃣ Digital first
+    try:
+        df = _extract_rhb_digital(pdf_path)
+        if df is not None and not df.empty:
+            return df
+    except Exception:
+        pass
 
-# ===================================================
-# 3️⃣ MONTHLY / PERIOD SUMMARY
-# ===================================================
+    # 2️⃣ OCR fallback
+    try:
+        df = _extract_rhb_ocr(pdf_path)
+        if df is not None and not df.empty:
+            return df
+    except Exception:
+        pass
 
-def compute_rhb_summary(df, od_limit):
-    opening = compute_opening_balance(df)
-    ending = df.iloc[-1]["balance"]
-
-    total_debit = df["debit"].sum()
-    total_credit = df["credit"].sum()
-
-    highest = df["balance"].max()
-    lowest = df["balance"].min()
-    swing = abs(highest - lowest)
-
-    od_util = abs(ending) if ending < 0 else 0
-    od_pct = (od_util / od_limit) * 100 if od_limit > 0 else 0
-
-    return {
-        "Opening": opening,
-        "Debit": total_debit,
-        "Credit": total_credit,
-        "Ending": ending,
-        "Highest": highest,
-        "Lowest": lowest,
-        "Swing": swing,
-        "OD Util (RM)": od_util,
-        "OD %": od_pct
-    }
-
-
-# ===================================================
-# 4️⃣ RATIOS (FROM YOUR NOTEBOOK)
-# ===================================================
-
-def compute_rhb_ratios(summary_df, od_limit):
-    ratio = {}
-
-    ratio["Total Credit (6 Months)"] = summary_df["Credit"].sum()
-    ratio["Total Debit (6 Months)"] = summary_df["Debit"].sum()
-    ratio["Annualized Credit"] = ratio["Total Credit (6 Months)"] * 2
-    ratio["Annualized Debit"] = ratio["Total Debit (6 Months)"] * 2
-    ratio["Average Opening Balance"] = summary_df["Opening"].mean()
-    ratio["Average Ending Balance"] = summary_df["Ending"].mean()
-    ratio["Highest Balance (Period)"] = summary_df["Highest"].max()
-    ratio["Lowest Balance (Period)"] = summary_df["Lowest"].min()
-    ratio["Average OD Util (RM)"] = summary_df["OD Util (RM)"].mean()
-    ratio["Average OD %"] = summary_df["OD %"].mean()
-    ratio["Average Swing"] = summary_df["Swing"].mean()
-
-    ratio["% of Swing"] = (
-        ratio["Average Swing"] / od_limit * 100
-        if od_limit > 0 else 0
+    # 3️⃣ Safe empty return
+    return pd.DataFrame(
+        columns=["date", "description", "debit", "credit", "balance"]
     )
-
-    return pd.DataFrame(list(ratio.items()), columns=["Metric", "Value"])
-
-
-# ===================================================
-# 5️⃣ EXCEL EXPORT
-# ===================================================
-
-def export_rhb_excel(summary_df, ratio_df, output_file):
-    wb = Workbook()
-    ws = wb.active
-    ws.title = "Bank Analysis"
-
-    header_fill = PatternFill(start_color="1F4E78", end_color="1F4E78", fill_type="solid")
-    header_font = Font(color="FFFFFF", bold=True)
-    thin = Side(border_style="thin")
-    border = Border(left=thin, right=thin, top=thin, bottom=thin)
-
-    ws.append(["RHB STATEMENT ANALYSIS"])
-    ws["A1"].font = Font(size=14, bold=True)
-    ws.append([])
-
-    for r in dataframe_to_rows(summary_df, index=False, header=True):
-        ws.append(r)
-
-    ws.append([])
-    ws.append(["FINANCIAL RATIOS"])
-    ws.append([])
-
-    for r in dataframe_to_rows(ratio_df, index=False, header=True):
-        ws.append(r)
-
-    for col in ws.columns:
-        ws.column_dimensions[col[0].column_letter].width = 22
-
-    wb.save(output_file)
-    return output_file
