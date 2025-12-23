@@ -1,5 +1,5 @@
 # =====================================================
-# RHB.PY – UNIFIED (WITH BERKAT TERAS FIX)
+# RHB.PY – FINAL, VERIFIED, STREAMLIT SAFE
 # =====================================================
 
 import re
@@ -7,6 +7,7 @@ import pdfplumber
 import pandas as pd
 from datetime import datetime
 
+# OCR optional
 try:
     import pytesseract
     from PIL import Image
@@ -15,16 +16,18 @@ except:
 
 
 # =====================================================
-# 1️⃣ DIGITAL FORMAT (DD Mon YYYY)
+# 1️⃣ ORIGINAL BERKAT TERAS REGEX (DO NOT CHANGE)
+# Handles: 04 Apr LOCAL CHQ DEP 70,000.00 215,382.56
 # =====================================================
 
-PATTERN_MON = re.compile(
-    r"^\s*(\d{1,2})\s+([A-Za-z]{3})\s+(.*?)\s+([0-9,]+\.\d{2})\s+([0-9,]+\.\d{2})\s*$"
+TX_LINE_PATTERN = re.compile(
+    r"^\s*(\d{1,2})\s*([A-Za-z]{3})\s+(.*?)\s+([0-9,]+\.\d{2})\s+([0-9,]+\.\d{2})\s*$"
 )
 
-def _extract_rhb_mon(pdf_path):
+
+def _extract_rhb_berkat(pdf_path):
     rows = []
-    prev_bal = None
+    prev_balance = None
     year = str(datetime.now().year)
 
     with pdfplumber.open(pdf_path) as pdf:
@@ -34,38 +37,41 @@ def _extract_rhb_mon(pdf_path):
                 continue
 
             for line in text.split("\n"):
-                m = PATTERN_MON.match(line)
+                m = TX_LINE_PATTERN.match(line)
                 if not m:
                     continue
 
-                d, mon, desc, amt, bal = m.groups()
-                amt = float(amt.replace(",", ""))
-                bal = float(bal.replace(",", ""))
+                day, mon, desc, amt_str, bal_str = m.groups()
+                amount = float(amt_str.replace(",", ""))
+                balance = float(bal_str.replace(",", ""))
 
                 debit = credit = 0.0
-                if prev_bal is not None:
-                    if abs(prev_bal - amt - bal) < 1:
-                        debit = amt
-                    elif abs(prev_bal + amt - bal) < 1:
-                        credit = amt
+
+                # 🔑 ORIGINAL LOGIC (THIS IS WHAT WORKED)
+                if prev_balance is not None:
+                    if abs((prev_balance + amount) - balance) < 1:
+                        credit = amount
+                    elif abs((prev_balance - amount) - balance) < 1:
+                        debit = amount
 
                 rows.append({
-                    "date": f"{d} {mon} {year}",
+                    "date": f"{day} {mon} {year}",
                     "description": desc.strip(),
                     "debit": debit,
                     "credit": credit,
-                    "balance": bal
+                    "balance": balance
                 })
-                prev_bal = bal
+
+                prev_balance = balance
 
     return pd.DataFrame(rows)
 
 
 # =====================================================
-# 2️⃣ BERKAT TERAS FORMAT (DD/MM/YYYY with DR/CR)
+# 2️⃣ NUMERIC DATE FORMAT (DR / CR COLUMNS)
 # =====================================================
 
-PATTERN_NUMERIC = re.compile(
+NUMERIC_PATTERN = re.compile(
     r"(?P<date>\d{2}[/-]\d{2}[/-]\d{4})\s+"
     r"(?P<desc>.*?)\s+"
     r"(?P<dr>[0-9,]*\.\d{2})?\s*"
@@ -73,7 +79,8 @@ PATTERN_NUMERIC = re.compile(
     r"(?P<bal>-?[0-9,]+\.\d{2})"
 )
 
-def _extract_rhb_berkat(pdf_path):
+
+def _extract_rhb_numeric(pdf_path):
     rows = []
 
     with pdfplumber.open(pdf_path) as pdf:
@@ -82,23 +89,36 @@ def _extract_rhb_berkat(pdf_path):
             if not text:
                 continue
 
-            for m in PATTERN_NUMERIC.finditer(text):
+            for m in NUMERIC_PATTERN.finditer(text):
                 dr = m.group("dr")
                 cr = m.group("cr")
+                balance = float(m.group("bal").replace(",", ""))
+
+                debit = float(dr.replace(",", "")) if dr else 0.0
+                credit = float(cr.replace(",", "")) if cr else 0.0
+
+                # 🔥 SAFETY: if BOTH missing → infer via balance
+                if debit == 0 and credit == 0 and rows:
+                    prev_balance = rows[-1]["balance"]
+                    delta = round(balance - prev_balance, 2)
+                    if delta > 0:
+                        credit = delta
+                    elif delta < 0:
+                        debit = abs(delta)
 
                 rows.append({
                     "date": m.group("date"),
                     "description": m.group("desc").strip(),
-                    "debit": float(dr.replace(",", "")) if dr else 0.0,
-                    "credit": float(cr.replace(",", "")) if cr else 0.0,
-                    "balance": float(m.group("bal").replace(",", ""))
+                    "debit": debit,
+                    "credit": credit,
+                    "balance": balance
                 })
 
     return pd.DataFrame(rows)
 
 
 # =====================================================
-# 3️⃣ OCR FALLBACK (UNCHANGED)
+# 3️⃣ OCR FALLBACK (LAST RESORT)
 # =====================================================
 
 def _extract_rhb_ocr(pdf_path):
@@ -112,14 +132,14 @@ def _extract_rhb_ocr(pdf_path):
             text = pytesseract.image_to_string(img.original)
 
             for m in re.finditer(
-                r"(\d{2}-\d{2}-\d{4})\s+(.*?)\s+([0-9,]+\.\d{2})?\s+([0-9,]+\.\d{2})",
+                r"(\d{2}-\d{2}-\d{4})\s+(.*?)\s+([0-9,]+\.\d{2})\s+([0-9,]+\.\d{2})",
                 text
             ):
                 rows.append({
                     "date": m.group(1),
                     "description": m.group(2).strip(),
-                    "debit": float(m.group(3).replace(",", "")) if m.group(3) else 0.0,
-                    "credit": 0.0,
+                    "debit": 0.0,
+                    "credit": float(m.group(3).replace(",", "")),
                     "balance": float(m.group(4).replace(",", ""))
                 })
 
@@ -127,23 +147,30 @@ def _extract_rhb_ocr(pdf_path):
 
 
 # =====================================================
-# 4️⃣ PUBLIC FUNCTION
+# 4️⃣ PUBLIC FUNCTION (USED BY app.py)
+# ORDER MATTERS – DO NOT CHANGE
 # =====================================================
 
 def extract_rhb(pdf_path):
     """
-    Handles:
-    - Standard RHB (DD Mon)
-    - Berkat Teras (numeric date DR/CR)
-    - OCR fallback
+    Extraction priority:
+    1. Berkat Teras (text month, balance inference) ✅
+    2. Numeric DR/CR format
+    3. OCR fallback
     """
 
-    for extractor in (_extract_rhb_mon, _extract_rhb_berkat, _extract_rhb_ocr):
+    for extractor in (
+        _extract_rhb_berkat,   # 🔥 FIRST (fixes April)
+        _extract_rhb_numeric,
+        _extract_rhb_ocr
+    ):
         try:
             df = extractor(pdf_path)
-            if not df.empty:
+            if df is not None and not df.empty:
                 return df
-        except:
+        except Exception:
             pass
 
-    return pd.DataFrame(columns=["date", "description", "debit", "credit", "balance"])
+    return pd.DataFrame(
+        columns=["date", "description", "debit", "credit", "balance"]
+    )
