@@ -1,15 +1,21 @@
+# =====================================================
+# MAYBANK.PY – COMBINED & STREAMLIT SAFE
+# =====================================================
+
+import re
 import fitz  # PyMuPDF
 import pdfplumber
-import re
 import pandas as pd
 from datetime import datetime
 
 
-# ============================================================
-# 🔹 MYTUTOR ENGINE (COPIED 1:1 LOGIC – SAFE)
-# ============================================================
+# =====================================================
+# 1️⃣ PYMuPDF WORD-BASED EXTRACTOR (MTASB / MYTUTOR)
+# (LOGIC UNCHANGED)
+# =====================================================
 
-def _extract_maybank_mytutor(pdf_path):
+def _extract_maybank_pymupdf(pdf_path):
+
     doc = fitz.open(pdf_path)
 
     # Detect statement year
@@ -23,11 +29,8 @@ def _extract_maybank_mytutor(pdf_path):
             statement_year = f"20{m.group(3)}"
             break
 
-    DATE_RE = re.compile(
-        r"^(\d{2}/\d{2}/\d{4}|\d{2}/\d{2}|\d{2}-\d{2}|\d{2}\s+[A-Z]{3})$",
-        re.IGNORECASE
-    )
-    AMOUNT_RE = re.compile(r"^(?:\d{1,3}(?:,\d{3})*|\d+)?\.\d{2}[+-]?$")
+    DATE_RE = re.compile(r"^(\d{2}/\d{2}/\d{4}|\d{2}/\d{2}|\d{2}-\d{2}|\d{2}\s+[A-Z]{3})$")
+    AMT_RE = re.compile(r"^(?:\d{1,3}(?:,\d{3})*|\d+)?\.\d{2}[+-]?$")
 
     def norm_date(token):
         token = token.strip().upper()
@@ -43,13 +46,12 @@ def _extract_maybank_mytutor(pdf_path):
         return None
 
     def parse_amt(t):
-        t = t.strip()
         sign = "+" if t.endswith("+") else "-" if t.endswith("-") else None
-        val = float(t.replace(",", "").rstrip("+-"))
-        return val, sign
+        v = float(t.replace(",", "").rstrip("+-"))
+        return v, sign
 
     transactions = []
-    previous_balance = None
+    prev_balance = None
 
     for page in doc:
         words = page.get_text("words")
@@ -57,13 +59,12 @@ def _extract_maybank_mytutor(pdf_path):
         rows.sort(key=lambda r: (round(r["y"], 1), r["x"]))
 
         used_y = set()
-
         for r in rows:
             if not DATE_RE.match(r["t"]):
                 continue
 
-            y_key = round(r["y"], 1)
-            if y_key in used_y:
+            y = round(r["y"], 1)
+            if y in used_y:
                 continue
 
             line = [w for w in rows if abs(w["y"] - r["y"]) <= 1.8]
@@ -77,22 +78,26 @@ def _extract_maybank_mytutor(pdf_path):
             for w in line:
                 if w["t"] == r["t"]:
                     continue
-                if AMOUNT_RE.match(w["t"]):
-                    amts.append(w["t"])
+                if AMT_RE.match(w["t"]):
+                    amts.append((w["x"], w["t"]))
                 else:
                     desc.append(w["t"])
 
             if not amts:
                 continue
 
-            balance, _ = parse_amt(amts[-1])
-            txn_val, txn_sign = (parse_amt(amts[-2]) if len(amts) > 1 else (None, None))
+            amts.sort(key=lambda a: a[0])
+            bal, _ = parse_amt(amts[-1][1])
 
-            debit = credit = 0.0
-            if previous_balance is not None:
-                delta = round(balance - previous_balance, 2)
+            txn_val, txn_sign = (None, None)
+            if len(amts) > 1:
+                txn_val, txn_sign = parse_amt(amts[-2][1])
+
+            debit, credit = 0.0, 0.0
+            if prev_balance is not None:
+                delta = round(bal - prev_balance, 2)
                 if delta > 0:
-                    credit = abs(delta)
+                    credit = delta
                 elif delta < 0:
                     debit = abs(delta)
                 else:
@@ -111,25 +116,28 @@ def _extract_maybank_mytutor(pdf_path):
                 "description": " ".join(desc).strip(),
                 "debit": debit,
                 "credit": credit,
-                "balance": balance
+                "balance": bal
             })
 
-            previous_balance = balance
-            used_y.add(y_key)
+            prev_balance = bal
+            used_y.add(y)
 
     return pd.DataFrame(transactions)
 
 
-# ============================================================
-# 🔹 CWS ENGINE (pdfplumber – SAFE FALLBACK)
-# ============================================================
+# =====================================================
+# 2️⃣ PDFPLUMBER LINE-BASED EXTRACTOR (CWS FORMAT)
+# (LOGIC UNCHANGED)
+# =====================================================
 
-def _extract_maybank_cws(pdf_path):
-    DATE_PATTERN = re.compile(r"^\d{2}\s+[A-Za-z]{3}\s+\d{4}")
-    AMOUNT_PATTERN = re.compile(r'([0-9,]+\.\d{2})\s*([+-])\s*([0-9,]+\.\d{2})')
+DATE_PATTERN = re.compile(r"^\d{2}\s+[A-Za-z]{3}\s+\d{4}")
+AMOUNT_PATTERN = re.compile(r'([0-9,]+\.\d{2})\s*([+-])\s*([0-9,]+\.\d{2})')
+
+def _extract_maybank_pdfplumber(pdf_path):
 
     txns = []
-    means = []
+    current = None
+    desc_buf = []
 
     with pdfplumber.open(pdf_path) as pdf:
         for page in pdf.pages:
@@ -137,43 +145,69 @@ def _extract_maybank_cws(pdf_path):
             if not text:
                 continue
 
-            for line in text.split("\n"):
-                line = line.strip()
-                if not DATE_PATTERN.match(line):
+            for raw in text.split("\n"):
+                line = raw.strip()
+                if not line:
                     continue
 
-                m = AMOUNT_PATTERN.search(line)
-                if not m:
-                    continue
+                if DATE_PATTERN.match(line):
+                    if current:
+                        current["description"] = " ".join(desc_buf).strip()
+                        txns.append(current)
 
-                amt = float(m.group(1).replace(",", ""))
-                sign = m.group(2)
-                bal = float(m.group(3).replace(",", ""))
+                    desc_buf = []
+                    m = AMOUNT_PATTERN.search(line)
+                    if not m:
+                        continue
 
-                txns.append({
-                    "date": line[:11],
-                    "description": line[:m.start()].strip(),
-                    "debit": amt if sign == "-" else 0.0,
-                    "credit": amt if sign == "+" else 0.0,
-                    "balance": bal
-                })
+                    amt = float(m.group(1).replace(",", ""))
+                    sign = m.group(2)
+                    bal = float(m.group(3).replace(",", ""))
+
+                    current = {
+                        "date": line[:11],
+                        "description": "",
+                        "debit": amt if sign == "-" else 0.0,
+                        "credit": amt if sign == "+" else 0.0,
+                        "balance": bal
+                    }
+
+                    desc_buf.append(line[:m.start()].strip())
+                else:
+                    if current:
+                        desc_buf.append(line)
+
+        if current:
+            current["description"] = " ".join(desc_buf).strip()
+            txns.append(current)
 
     return pd.DataFrame(txns)
 
 
-# ============================================================
-# 🚀 FINAL EXTRACTOR (USED BY STREAMLIT)
-# ============================================================
+# =====================================================
+# 3️⃣ PUBLIC FUNCTION (USED BY app.py)
+# =====================================================
 
 def extract_maybank(pdf_path):
-    # 1️⃣ Try MyTutor FIRST (authoritative)
-    df = _extract_maybank_mytutor(pdf_path)
-    if not df.empty:
-        return df.reset_index(drop=True)
+    """
+    Streamlit-safe Maybank extractor.
+    Tries PyMuPDF first, falls back to pdfplumber.
+    Output columns are STRICTLY:
+    date | description | debit | credit | balance
+    """
 
-    # 2️⃣ Fallback to CWS
-    df = _extract_maybank_cws(pdf_path)
-    if not df.empty:
-        return df.reset_index(drop=True)
+    try:
+        df = _extract_maybank_pymupdf(pdf_path)
+        if df is not None and not df.empty:
+            return df
+    except Exception:
+        pass
+
+    try:
+        df = _extract_maybank_pdfplumber(pdf_path)
+        if df is not None and not df.empty:
+            return df
+    except Exception:
+        pass
 
     return pd.DataFrame(columns=["date", "description", "debit", "credit", "balance"])
