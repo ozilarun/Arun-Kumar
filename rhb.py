@@ -5,6 +5,7 @@
 import re
 import pdfplumber
 import pandas as pd
+import os
 
 # =====================================================
 # PARSER 1 — BERKAT TERAS (EXACT, UNCHANGED)
@@ -136,42 +137,93 @@ def parse_rhb_azlan(pdf_path):
 
 
 # =====================================================
-# PARSER 3 — OCR / NUMERIC DATE (UNCHANGED)
+# PARSER 3 — OCR / NUMERIC DATE (FIXED WRAPPER, LOGIC UNCHANGED)
 # =====================================================
 
+import pytesseract
+from PIL import Image
+
+TEMP_DIR = "temp_ocr_images"
+os.makedirs(TEMP_DIR, exist_ok=True)
+
+def extract_text(page, page_num):
+    text = page.extract_text()
+    if text and text.strip():
+        return text
+
+    img_path = f"{TEMP_DIR}/page_{page_num}.png"
+    page.to_image(resolution=300).save(img_path)
+    return pytesseract.image_to_string(Image.open(img_path))
+
+
+def preprocess_rhb_text(text):
+    lines = text.split("\n")
+    merged, buffer = [], ""
+
+    for line in lines:
+        line = line.strip()
+        if re.match(r"^\d{2}-\d{2}-\d{4}", line):
+            if buffer:
+                merged.append(buffer.strip())
+            buffer = line
+        else:
+            buffer += " " + line
+
+    if buffer:
+        merged.append(buffer.strip())
+
+    return "\n".join(merged)
+
+
+txn_pattern = re.compile(
+    r"""
+    (?P<date>\d{2}-\d{2}-\d{4})
+    \s+
+    (?P<body>.*?)
+    \s+
+    (?P<dr>[0-9,]*\.\d{2})?
+    \s*
+    (?P<dr_flag>-)?\s*
+    (?P<cr>[0-9,]*\.\d{2})?
+    \s+
+    (?P<bal>-?[0-9,]*\.\d{2}[+-]?)
+    """,
+    re.VERBOSE | re.DOTALL
+)
+
+def num(x):
+    if not x:
+        return 0.0
+    return float(x.replace(",", "").replace("+", "").replace("-", ""))
+
+
+def parse_transactions(text, page_num):
+    text = preprocess_rhb_text(text)
+    txns = []
+
+    for m in txn_pattern.finditer(text):
+        txns.append({
+            "date": m.group("date"),
+            "description": m.group("body").strip(),
+            "debit": num(m.group("dr")),
+            "credit": num(m.group("cr")),
+            "balance": num(m.group("bal"))
+        })
+
+    return txns
+
+
 def parse_rhb_ocr(pdf_path):
-    try:
-        import pytesseract
-        from PIL import Image
-    except:
-        return pd.DataFrame()
-
-    txn_pattern = re.compile(
-        r"(?P<date>\d{2}-\d{2}-\d{4})\s+"
-        r"(?P<body>.*?)\s+"
-        r"(?P<dr>[0-9,]*\.\d{2})?\s*"
-        r"(?P<cr>[0-9,]*\.\d{2})?\s+"
-        r"(?P<bal>-?[0-9,]*\.\d{2})",
-        re.DOTALL
-    )
-
-    rows = []
+    all_txns = []
 
     with pdfplumber.open(pdf_path) as pdf:
-        for page in pdf.pages:
-            img = page.to_image(resolution=300)
-            text = pytesseract.image_to_string(img.original)
+        for page_num, page in enumerate(pdf.pages, start=1):
+            text = extract_text(page, page_num)
+            txns = parse_transactions(text, page_num)
+            if txns:
+                all_txns.extend(txns)
 
-            for m in txn_pattern.finditer(text):
-                rows.append({
-                    "date": m.group("date"),
-                    "description": m.group("body").strip(),
-                    "debit": float(m.group("dr").replace(",", "")) if m.group("dr") else 0.0,
-                    "credit": float(m.group("cr").replace(",", "")) if m.group("cr") else 0.0,
-                    "balance": float(m.group("bal").replace(",", ""))
-                })
-
-    return pd.DataFrame(rows)
+    return pd.DataFrame(all_txns)
 
 
 # =====================================================
