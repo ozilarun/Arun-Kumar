@@ -6,4 +6,4 @@ regex
 tabulate
 pandas
 openpyxl
-
+pymupdf
