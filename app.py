@@ -2,8 +2,26 @@ import streamlit as st
 import tempfile
 import pandas as pd
 
+from openpyxl import Workbook
+from openpyxl.styles import Font, PatternFill, Border, Side
+from openpyxl.utils.dataframe import dataframe_to_rows
+
 # =====================================================
-# PAGE CONFIG (MUST BE FIRST)
+# BANK IMPORTS (DO NOT TOUCH)
+# =====================================================
+# Ensure you have maybank.py, cimb.py, etc. in the same folder
+try:
+    from bank_rakyat import extract_bank_rakyat
+    from bank_islam import extract_bank_islam
+    from cimb import extract_cimb
+    from maybank import extract_maybank
+    from rhb import extract_rhb
+except ImportError as e:
+    st.error(f"Missing bank file: {e}")
+    st.stop()
+
+# =====================================================
+# PAGE CONFIG
 # =====================================================
 st.set_page_config(
     page_title="Bank Statement Analysis",
@@ -13,45 +31,20 @@ st.set_page_config(
 st.title("🏦 Bank Statement Analysis")
 
 # =====================================================
-# SESSION STATE
-# =====================================================
-if "run_clicked" not in st.session_state:
-    st.session_state.run_clicked = False
-
-if "df_all" not in st.session_state:
-    st.session_state.df_all = None
-
-if "status" not in st.session_state:
-    st.session_state.status = "idle"
-
-# =====================================================
-# 🔴 BUTTONS FIRST (CRITICAL FIX)
-# =====================================================
-col1, col2 = st.columns(2)
-
-with col1:
-    if st.button("▶ Run Analysis", use_container_width=True):
-        st.session_state.run_clicked = True
-        st.session_state.status = "running"
-
-with col2:
-    if st.button("🔄 Reset", use_container_width=True):
-        st.session_state.run_clicked = False
-        st.session_state.df_all = None
-        st.session_state.status = "idle"
-        st.rerun()
-
-st.markdown(f"### ⚙️ Status: **{st.session_state.status.upper()}**")
-
-st.divider()
-
-# =====================================================
 # BANK SELECTION
 # =====================================================
 bank_choice = st.selectbox(
     "Select Bank",
     ["Bank Rakyat", "Bank Islam", "CIMB", "Maybank", "RHB"]
 )
+
+BANK_EXTRACTORS = {
+    "Bank Rakyat": extract_bank_rakyat,
+    "Bank Islam": extract_bank_islam,
+    "CIMB": extract_cimb,
+    "Maybank": extract_maybank,
+    "RHB": extract_rhb,
+}
 
 # =====================================================
 # FILE UPLOAD
@@ -62,8 +55,58 @@ uploaded_files = st.file_uploader(
     accept_multiple_files=True
 )
 
+if not uploaded_files:
+    st.info("Please upload a file to continue.")
+    st.stop()
+
 # =====================================================
-# OD LIMIT
+# EXTRACTION
+# =====================================================
+extractor = BANK_EXTRACTORS[bank_choice]
+all_dfs = []
+
+# Progress bar just in case multiple files take time
+progress_bar = st.progress(0)
+
+for i, uploaded_file in enumerate(uploaded_files):
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
+        tmp.write(uploaded_file.read())
+        pdf_path = tmp.name
+
+    try:
+        df = extractor(pdf_path)
+
+        if df is not None and not df.empty:
+            # -----------------------------------------------------------
+            # AUTO-SORT (Essential fix for Maybank Mixed Formats)
+            # -----------------------------------------------------------
+            try:
+                df["_sort_temp"] = pd.to_datetime(df["date"], dayfirst=True, errors='coerce')
+                df = df.sort_values(by="_sort_temp", ascending=True)
+                df = df.drop(columns=["_sort_temp"]).reset_index(drop=True)
+            except:
+                pass 
+            
+            all_dfs.append(df)
+        else:
+            st.warning(f"No data found in {uploaded_file.name}")
+            
+    except Exception as e:
+        st.error(f"Error extracting {uploaded_file.name}: {e}")
+
+    progress_bar.progress((i + 1) / len(uploaded_files))
+
+if not all_dfs:
+    st.error("No transactions extracted from any file.")
+    st.stop()
+
+df_all = pd.concat(all_dfs, ignore_index=True)
+
+st.subheader("📄 Cleaned Transaction List (Chronological)")
+st.dataframe(df_all, use_container_width=True)
+
+# =====================================================
+# OD LIMIT INPUT
 # =====================================================
 OD_LIMIT = st.number_input(
     "Enter OD Limit (RM)",
@@ -72,98 +115,55 @@ OD_LIMIT = st.number_input(
 )
 
 # =====================================================
-# LAZY BANK IMPORTS (SAFE)
+# HELPER FUNCTIONS
 # =====================================================
-def get_extractor(bank):
-    if bank == "Bank Rakyat":
-        from bank_rakyat import extract_bank_rakyat
-        return extract_bank_rakyat
-    if bank == "Bank Islam":
-        from bank_islam import extract_bank_islam
-        return extract_bank_islam
-    if bank == "CIMB":
-        from cimb import extract_cimb
-        return extract_cimb
-    if bank == "Maybank":
-        from maybank import extract_maybank
-        return extract_maybank
-    if bank == "RHB":
-        from rhb import extract_rhb
-        return extract_rhb
+def compute_opening_balance_from_row(row):
+    # Backward calc: Prev = Curr - Credit + Debit
+    return row["balance"] - row["credit"] + row["debit"]
 
-# =====================================================
-# EXTRACTION (ONLY AFTER BUTTON CLICK)
-# =====================================================
-if st.session_state.run_clicked:
 
-    if not uploaded_files:
-        st.warning("Please upload at least one PDF.")
-    else:
-        extractor = get_extractor(bank_choice)
-        all_dfs = []
-
-        with st.spinner("Extracting transactions..."):
-            for f in uploaded_files:
-                with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
-                    tmp.write(f.read())
-                    pdf_path = tmp.name
-
-                try:
-                    df = extractor(pdf_path)
-                except Exception as e:
-                    st.error(f"Extraction failed: {e}")
-                    continue
-
-                if df is not None and not df.empty:
-                    df["_dt"] = pd.to_datetime(df["date"], dayfirst=True, errors="coerce")
-                    df = df.dropna(subset=["_dt"]).sort_values("_dt")
-                    df = df.drop(columns="_dt").reset_index(drop=True)
-                    all_dfs.append(df)
-
-        if all_dfs:
-            st.session_state.df_all = pd.concat(all_dfs, ignore_index=True)
-            st.session_state.status = "completed"
-            st.success("Extraction completed successfully.")
-        else:
-            st.error("No transactions extracted.")
-
-    st.session_state.run_clicked = False
-
-# =====================================================
-# DISPLAY RESULTS
-# =====================================================
-if st.session_state.df_all is not None:
-    st.subheader("📄 Transactions")
-    st.dataframe(st.session_state.df_all, use_container_width=True)
-
-# =====================================================
-# CORE CALCULATION LOGIC (UNCHANGED)
-# =====================================================
 def split_by_month(df):
     temp = df.copy()
-    temp["_dt"] = pd.to_datetime(temp["date"], dayfirst=True, errors="coerce")
+    temp["_dt"] = pd.to_datetime(temp["date"], dayfirst=True, errors='coerce')
     temp = temp.dropna(subset=["_dt"])
 
+    month_order = (
+        temp.assign(m=temp["_dt"].dt.to_period("M"))
+        .groupby("m")["_dt"]
+        .min()
+        .sort_values()
+        .index
+    )
+
     months = {}
-    for m, g in temp.groupby(temp["_dt"].dt.to_period("M")):
-        months[m.strftime("%b %Y")] = (
-            g.drop(columns="_dt").reset_index(drop=True)
+    for m in month_order:
+        label = m.strftime("%b %Y")
+        months[label] = (
+            temp[temp["_dt"].dt.to_period("M") == m]
+            .drop(columns="_dt")
+            .reset_index(drop=True)
         )
+
     return months
 
 
-def compute_monthly_summary(months, od_limit):
+def compute_monthly_summary(all_months, od_limit, bank_name):
     rows = []
     prev_ending = None
 
-    for month, df in months.items():
-        if df.empty:
-            continue
+    for month, df in all_months.items():
+        if df.empty: continue
 
+        # Data is already sorted Oldest -> Newest
         first_txn = df.iloc[0]
         last_txn = df.iloc[-1]
 
-        opening = first_txn["balance"] if prev_ending is None else prev_ending
+        # Opening balance
+        if prev_ending is None:
+            opening = compute_opening_balance_from_row(first_txn)
+        else:
+            opening = prev_ending
+
         ending = last_txn["balance"]
 
         debit = df["debit"].sum()
@@ -181,51 +181,71 @@ def compute_monthly_summary(months, od_limit):
 
         rows.append({
             "Month": month,
-            "Opening Balance": opening,
+            "Opening": opening,
             "Debit": debit,
             "Credit": credit,
-            "Ending Balance": ending,
-            "Highest Balance": highest,
-            "Lowest Balance": lowest,
-            "Monthly Swing": swing,
-            "OD Utilization": od_util,
-            "Monthly OD %": od_pct
+            "Ending": ending,
+            "Highest": highest,
+            "Lowest": lowest,
+            "Swing": swing,
+            "OD Util (RM)": od_util,
+            "OD %": od_pct
         })
 
         prev_ending = ending
 
     return pd.DataFrame(rows)
-if st.session_state.df_all is not None:
 
-    df_all = st.session_state.df_all
 
-    st.subheader("📄 Transactions")
-    st.dataframe(df_all, use_container_width=True)
+def compute_ratios(summary, od_limit):
+    df = summary.copy()
+    if df.empty: return pd.DataFrame()
 
-    # ===============================
-    # MONTHLY CALCULATION
-    # ===============================
+    return pd.DataFrame(
+        [
+            ("Total Credit (6 Months)", df["Credit"].sum()),
+            ("Total Debit (6 Months)", df["Debit"].sum()),
+            ("Annualized Credit", df["Credit"].sum() * 2),
+            ("Annualized Debit", df["Debit"].sum() * 2),
+            ("Average Opening Balance", df["Opening"].mean()),
+            ("Average Ending Balance", df["Ending"].mean()),
+            ("Highest Balance (Period)", df["Highest"].max()),
+            ("Lowest Balance (Period)", df["Lowest"].min()),
+            ("Average OD Utilization (RM)", df["OD Util (RM)"].mean() if od_limit > 0 else 0),
+            ("Average % OD Utilization", df["OD %"].mean() if od_limit > 0 else 0),
+            ("Average Monthly Swing (RM)", df["Swing"].mean()),
+            ("% of Swing", (df["Swing"].mean() / od_limit * 100) if od_limit > 0 else 0),
+            ("Returned Cheques", 0),
+            ("Number of Excesses", int((df["OD Util (RM)"] > od_limit).sum()) if od_limit > 0 else 0),
+        ],
+        columns=["Metric", "Value"]
+    )
+
+# =====================================================
+# RUN ANALYSIS
+# =====================================================
+if st.button("Run Analysis", type="primary"):
+
     months = split_by_month(df_all)
-    monthly_summary = compute_monthly_summary(months, OD_LIMIT)
+
+    st.subheader("📂 Monthly Breakdown (Audit)")
+    for month, mdf in months.items():
+        with st.expander(f"Show {month}"):
+            st.dataframe(mdf, use_container_width=True)
+
+    monthly_summary = compute_monthly_summary(
+        months,
+        OD_LIMIT,
+        bank_choice
+    )
+
+    ratio_df = compute_ratios(
+        monthly_summary,
+        OD_LIMIT
+    )
 
     st.subheader("📅 Monthly Summary")
     st.dataframe(monthly_summary, use_container_width=True)
-# ===============================
-# EXCEL EXPORT
-# ===============================
-if not monthly_summary.empty:
-    if st.button("📥 Export Excel"):
-        output_path = write_to_excel(
-            df_all=df_all,
-            monthly_summary=monthly_summary,
-            od_limit=OD_LIMIT
-        )
 
-        with open(output_path, "rb") as f:
-            st.download_button(
-                label="⬇️ Download Excel File",
-                data=f,
-                file_name=output_path,
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-            )
-
+    st.subheader("📊 Financial Ratios")
+    st.dataframe(ratio_df, use_container_width=True)
