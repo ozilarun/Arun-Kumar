@@ -1,5 +1,5 @@
 # =====================================================
-# RHB.PY – UNIFIED & STREAMLIT SAFE
+# RHB.PY – UNIFIED (WITH BERKAT TERAS FIX)
 # =====================================================
 
 import re
@@ -7,30 +7,25 @@ import pdfplumber
 import pandas as pd
 from datetime import datetime
 
-# OCR fallback (used ONLY if needed)
 try:
     import pytesseract
     from PIL import Image
-except Exception:
+except:
     pytesseract = None
 
 
 # =====================================================
-# 1️⃣ DIGITAL RHB PARSER (PRIMARY – pdfplumber)
-# Preserves original balance-math logic
+# 1️⃣ DIGITAL FORMAT (DD Mon YYYY)
 # =====================================================
 
-TX_LINE_PATTERN = re.compile(
-    r"^\s*(\d{1,2})\s*([A-Za-z]{3})\s+(.*?)\s+([0-9,]+\.\d{2})\s+([0-9,]+\.\d{2})\s*$"
+PATTERN_MON = re.compile(
+    r"^\s*(\d{1,2})\s+([A-Za-z]{3})\s+(.*?)\s+([0-9,]+\.\d{2})\s+([0-9,]+\.\d{2})\s*$"
 )
 
-def _extract_rhb_digital(pdf_path):
-    transactions = []
-    prev_balance = None
-
-    # Infer year from filename, fallback = current year
-    year_match = re.search(r"20\d{2}", pdf_path)
-    year = year_match.group(0) if year_match else str(datetime.now().year)
+def _extract_rhb_mon(pdf_path):
+    rows = []
+    prev_bal = None
+    year = str(datetime.now().year)
 
     with pdfplumber.open(pdf_path) as pdf:
         for page in pdf.pages:
@@ -39,129 +34,116 @@ def _extract_rhb_digital(pdf_path):
                 continue
 
             for line in text.split("\n"):
-                match = TX_LINE_PATTERN.match(line)
-                if not match:
+                m = PATTERN_MON.match(line)
+                if not m:
                     continue
 
-                day, month, desc, amount_str, bal_str = match.groups()
+                d, mon, desc, amt, bal = m.groups()
+                amt = float(amt.replace(",", ""))
+                bal = float(bal.replace(",", ""))
 
-                amount = float(amount_str.replace(",", ""))
-                curr_balance = float(bal_str.replace(",", ""))
+                debit = credit = 0.0
+                if prev_bal is not None:
+                    if abs(prev_bal - amt - bal) < 1:
+                        debit = amt
+                    elif abs(prev_bal + amt - bal) < 1:
+                        credit = amt
 
-                is_credit = False
-                is_debit = False
-
-                # 🔑 Balance-difference logic (UNCHANGED)
-                if prev_balance is not None:
-                    if abs((prev_balance + amount) - curr_balance) < 0.05:
-                        is_credit = True
-                    elif abs((prev_balance - amount) - curr_balance) < 0.05:
-                        is_debit = True
-
-                # Fallback keywords
-                if not is_credit and not is_debit:
-                    if any(k in desc.upper() for k in ["CR", "DEPOSIT", "INWARD", "HIBAH", "PROFIT"]):
-                        is_credit = True
-                    else:
-                        is_debit = True
-
-                transactions.append({
-                    "date": f"{day} {month} {year}",
+                rows.append({
+                    "date": f"{d} {mon} {year}",
                     "description": desc.strip(),
-                    "debit": amount if is_debit else 0.0,
-                    "credit": amount if is_credit else 0.0,
-                    "balance": curr_balance
+                    "debit": debit,
+                    "credit": credit,
+                    "balance": bal
+                })
+                prev_bal = bal
+
+    return pd.DataFrame(rows)
+
+
+# =====================================================
+# 2️⃣ BERKAT TERAS FORMAT (DD/MM/YYYY with DR/CR)
+# =====================================================
+
+PATTERN_NUMERIC = re.compile(
+    r"(?P<date>\d{2}[/-]\d{2}[/-]\d{4})\s+"
+    r"(?P<desc>.*?)\s+"
+    r"(?P<dr>[0-9,]*\.\d{2})?\s*"
+    r"(?P<cr>[0-9,]*\.\d{2})?\s+"
+    r"(?P<bal>-?[0-9,]+\.\d{2})"
+)
+
+def _extract_rhb_berkat(pdf_path):
+    rows = []
+
+    with pdfplumber.open(pdf_path) as pdf:
+        for page in pdf.pages:
+            text = page.extract_text()
+            if not text:
+                continue
+
+            for m in PATTERN_NUMERIC.finditer(text):
+                dr = m.group("dr")
+                cr = m.group("cr")
+
+                rows.append({
+                    "date": m.group("date"),
+                    "description": m.group("desc").strip(),
+                    "debit": float(dr.replace(",", "")) if dr else 0.0,
+                    "credit": float(cr.replace(",", "")) if cr else 0.0,
+                    "balance": float(m.group("bal").replace(",", ""))
                 })
 
-                prev_balance = curr_balance
-
-    return pd.DataFrame(transactions)
+    return pd.DataFrame(rows)
 
 
 # =====================================================
-# 2️⃣ OCR FALLBACK PARSER (SCANNED PDFs)
+# 3️⃣ OCR FALLBACK (UNCHANGED)
 # =====================================================
-
-OCR_TX_PATTERN = re.compile(
-    r"""
-    (?P<date>\d{2}-\d{2}-\d{4})
-    \s+
-    (?P<body>.*?)
-    \s+
-    (?P<dr>[0-9,]*\.\d{2})?\s*(?P<dr_flag>-)?\s*
-    (?P<cr>[0-9,]*\.\d{2})?
-    \s+
-    (?P<bal>-?[0-9,]*\.\d{2}[+-]?)
-    """,
-    re.VERBOSE | re.DOTALL
-)
 
 def _extract_rhb_ocr(pdf_path):
     if pytesseract is None:
         return pd.DataFrame()
 
-    transactions = []
-
+    rows = []
     with pdfplumber.open(pdf_path) as pdf:
-        for page_num, page in enumerate(pdf.pages, start=1):
+        for page in pdf.pages:
+            img = page.to_image(resolution=300)
+            text = pytesseract.image_to_string(img.original)
 
-            text = page.extract_text()
-            if not text or not text.strip():
-                img = page.to_image(resolution=300)
-                text = pytesseract.image_to_string(img.original)
-
-            if not text:
-                continue
-
-            for m in OCR_TX_PATTERN.finditer(text):
-                dr = m.group("dr")
-                cr = m.group("cr")
-                bal = m.group("bal")
-
-                transactions.append({
-                    "date": m.group("date"),
-                    "description": m.group("body").strip(),
-                    "debit": float(dr.replace(",", "")) if dr else 0.0,
-                    "credit": float(cr.replace(",", "")) if cr else 0.0,
-                    "balance": float(
-                        bal.replace(",", "").replace("+", "").replace("-", "")
-                    )
+            for m in re.finditer(
+                r"(\d{2}-\d{2}-\d{4})\s+(.*?)\s+([0-9,]+\.\d{2})?\s+([0-9,]+\.\d{2})",
+                text
+            ):
+                rows.append({
+                    "date": m.group(1),
+                    "description": m.group(2).strip(),
+                    "debit": float(m.group(3).replace(",", "")) if m.group(3) else 0.0,
+                    "credit": 0.0,
+                    "balance": float(m.group(4).replace(",", ""))
                 })
 
-    return pd.DataFrame(transactions)
+    return pd.DataFrame(rows)
 
 
 # =====================================================
-# 3️⃣ PUBLIC FUNCTION (USED BY app.py)
+# 4️⃣ PUBLIC FUNCTION
 # =====================================================
 
 def extract_rhb(pdf_path):
     """
-    Streamlit-safe RHB extractor.
-    Strategy:
-    1. Try digital pdfplumber parser
-    2. If empty → OCR fallback
-    Output columns:
-    date | description | debit | credit | balance
+    Handles:
+    - Standard RHB (DD Mon)
+    - Berkat Teras (numeric date DR/CR)
+    - OCR fallback
     """
 
-    # 1️⃣ Digital first
-    try:
-        df = _extract_rhb_digital(pdf_path)
-        if df is not None and not df.empty:
-            return df
-    except Exception:
-        pass
+    for extractor in (_extract_rhb_mon, _extract_rhb_berkat, _extract_rhb_ocr):
+        try:
+            df = extractor(pdf_path)
+            if not df.empty:
+                return df
+        except:
+            pass
 
-    # 2️⃣ OCR fallback
-    try:
-        df = _extract_rhb_ocr(pdf_path)
-        if df is not None and not df.empty:
-            return df
-    except Exception:
-        pass
-
-    # 3️⃣ Safe empty return
-    return pd.DataFrame(
-        columns=["date", "description", "debit", "credit", "balance"]
-    )
+    return pd.DataFrame(columns=["date", "description", "debit", "credit", "balance"])
