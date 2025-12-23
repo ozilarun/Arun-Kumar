@@ -3,16 +3,7 @@ import tempfile
 import pandas as pd
 
 # =====================================================
-# BANK IMPORTS (DO NOT TOUCH)
-# =====================================================
-from bank_rakyat import extract_bank_rakyat
-from bank_islam import extract_bank_islam
-from cimb import extract_cimb
-from maybank import extract_maybank
-from rhb import extract_rhb
-
-# =====================================================
-# PAGE CONFIG
+# PAGE CONFIG (MUST BE FIRST STREAMLIT CALL)
 # =====================================================
 st.set_page_config(
     page_title="Bank Statement Analysis",
@@ -22,7 +13,7 @@ st.set_page_config(
 st.title("🏦 Bank Statement Analysis")
 
 # =====================================================
-# SESSION STATE (CRITICAL)
+# SESSION STATE
 # =====================================================
 if "status" not in st.session_state:
     st.session_state.status = "idle"
@@ -34,20 +25,12 @@ if "run_clicked" not in st.session_state:
     st.session_state.run_clicked = False
 
 # =====================================================
-# BANK SELECTION
+# BANK SELECTION (SAFE – NO IMPORTS YET)
 # =====================================================
 bank_choice = st.selectbox(
     "Select Bank",
     ["Bank Rakyat", "Bank Islam", "CIMB", "Maybank", "RHB"]
 )
-
-BANK_EXTRACTORS = {
-    "Bank Rakyat": extract_bank_rakyat,
-    "Bank Islam": extract_bank_islam,
-    "CIMB": extract_cimb,
-    "Maybank": extract_maybank,
-    "RHB": extract_rhb,
-}
 
 # =====================================================
 # FILE UPLOAD
@@ -60,10 +43,9 @@ uploaded_files = st.file_uploader(
 
 if uploaded_files:
     uploaded_files = sorted(uploaded_files, key=lambda x: x.name)
-    st.session_state.uploaded_count = len(uploaded_files)
 
 # =====================================================
-# OD LIMIT INPUT
+# OD LIMIT
 # =====================================================
 OD_LIMIT = st.number_input(
     "Enter OD Limit (RM)",
@@ -72,7 +54,7 @@ OD_LIMIT = st.number_input(
 )
 
 # =====================================================
-# RUN / RESET BUTTONS
+# RUN / RESET BUTTONS  ✅ THIS WILL NOW RENDER
 # =====================================================
 col1, col2 = st.columns(2)
 
@@ -91,60 +73,93 @@ with col2:
 st.markdown(f"### ⚙️ Status: **{st.session_state.status.upper()}**")
 
 # =====================================================
-# EXTRACTION (RUNS ONLY ON BUTTON CLICK)
+# LAZY BANK IMPORTS (CRITICAL FIX)
+# =====================================================
+def get_bank_extractor(bank_name):
+    if bank_name == "Bank Rakyat":
+        from bank_rakyat import extract_bank_rakyat
+        return extract_bank_rakyat
+
+    if bank_name == "Bank Islam":
+        from bank_islam import extract_bank_islam
+        return extract_bank_islam
+
+    if bank_name == "CIMB":
+        from cimb import extract_cimb
+        return extract_cimb
+
+    if bank_name == "Maybank":
+        from maybank import extract_maybank
+        return extract_maybank
+
+    if bank_name == "RHB":
+        from rhb import extract_rhb
+        return extract_rhb
+
+    return None
+
+# =====================================================
+# EXTRACTION (RUNS ONLY AFTER BUTTON CLICK)
 # =====================================================
 if uploaded_files and st.session_state.run_clicked:
 
-    extractor = BANK_EXTRACTORS[bank_choice]
-    all_dfs = []
+    extractor = get_bank_extractor(bank_choice)
 
-    with st.spinner("Extracting transactions..."):
-        for uploaded_file in uploaded_files:
-            with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
-                tmp.write(uploaded_file.read())
-                pdf_path = tmp.name
-
-            df = extractor(pdf_path)
-
-            if df is not None and not df.empty:
-                try:
-                    df["_dt"] = pd.to_datetime(
-                        df["date"], dayfirst=True, errors="coerce"
-                    )
-                    df = (
-                        df.sort_values("_dt")
-                        .drop(columns="_dt")
-                        .reset_index(drop=True)
-                    )
-                except Exception:
-                    pass
-
-                all_dfs.append(df)
-
-    if not all_dfs:
-        st.error("❌ No transactions extracted.")
-        st.session_state.status = "idle"
+    if extractor is None:
+        st.error("❌ Bank extractor not found.")
     else:
-        st.session_state.df_all = pd.concat(all_dfs, ignore_index=True)
-        st.session_state.status = "completed"
-        st.success("✅ Extraction completed successfully.")
+        all_dfs = []
 
-    # IMPORTANT: stop reruns
+        with st.spinner("Extracting transactions..."):
+            for uploaded_file in uploaded_files:
+                with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
+                    tmp.write(uploaded_file.read())
+                    pdf_path = tmp.name
+
+                try:
+                    df = extractor(pdf_path)
+                except Exception as e:
+                    st.error(f"Extraction failed: {e}")
+                    df = None
+
+                if df is not None and not df.empty:
+                    try:
+                        df["_dt"] = pd.to_datetime(
+                            df["date"], dayfirst=True, errors="coerce"
+                        )
+                        df = (
+                            df.sort_values("_dt")
+                            .drop(columns="_dt")
+                            .reset_index(drop=True)
+                        )
+                    except Exception:
+                        pass
+
+                    all_dfs.append(df)
+
+        if not all_dfs:
+            st.error("❌ No transactions extracted.")
+            st.session_state.status = "idle"
+        else:
+            st.session_state.df_all = pd.concat(all_dfs, ignore_index=True)
+            st.session_state.status = "completed"
+            st.success("✅ Extraction completed.")
+
     st.session_state.run_clicked = False
 
 # =====================================================
-# DISPLAY TRANSACTIONS & ANALYSIS
+# DISPLAY RESULTS (UNCHANGED LOGIC)
 # =====================================================
 if st.session_state.df_all is not None:
 
     df_all = st.session_state.df_all
 
-    st.subheader("📄 Cleaned Transaction List (Chronological)")
+    st.subheader("📄 Cleaned Transaction List")
     st.dataframe(df_all, use_container_width=True)
 
-    # -------------------------------------------------
-    # Helper Functions (UNCHANGED LOGIC)
-    # -------------------------------------------------
+    # -------------------------------
+    # Helper functions
+    # -------------------------------
     def split_by_month(df):
         temp = df.copy()
         temp["_dt"] = pd.to_datetime(temp["date"], dayfirst=True, errors="coerce")
@@ -201,11 +216,7 @@ if st.session_state.df_all is not None:
 
         return pd.DataFrame(rows)
 
-    # -------------------------------------------------
-    # MONTHLY SUMMARY (OUTPUT UNCHANGED)
-    # -------------------------------------------------
-    months = split_by_month(df_all)
-
     st.subheader("📅 Monthly Summary")
+    months = split_by_month(df_all)
     monthly_summary = compute_monthly_summary(months, OD_LIMIT)
     st.dataframe(monthly_summary, use_container_width=True)
