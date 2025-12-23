@@ -9,39 +9,40 @@ from datetime import datetime
 # ==============================================================================
 def extract_maybank(pdf_path):
     """
-    Universal Maybank Extractor.
-    Attempts two strategies:
-    1. CWS Strategy (Text-based, typical for Corporate/Business with specific ID)
-    2. Mytutor Strategy (Coordinate-based, typical for Statements with irregular columns)
+    Universal Maybank Parser.
+    1. Tries CWS Strategy first (Corporate/Business - Text Regex).
+    2. If empty, falls back to Mytutor Strategy (Personal/Savings - Coordinate/PyMuPDF).
     """
     # 1. Try CWS Strategy
     try:
-        df = _parse_cws_strategy(pdf_path)
+        df = _parse_cws(pdf_path)
         if df is not None and not df.empty:
             return df
     except Exception as e:
-        print(f"CWS Strategy failed: {e}")
+        print(f"CWS Strategy skipped: {e}")
 
     # 2. Try Mytutor Strategy (Fallback)
     try:
-        df = _parse_mytutor_strategy(pdf_path)
+        df = _parse_mytutor(pdf_path)
         if df is not None and not df.empty:
             return df
     except Exception as e:
-        print(f"Mytutor Strategy failed: {e}")
+        print(f"Mytutor Strategy skipped: {e}")
 
-    # 3. Return empty if both fail
+    # 3. Return Empty if both fail
     return pd.DataFrame(columns=["date", "description", "debit", "credit", "balance"])
 
+
 # ==============================================================================
-# STRATEGY 1: CWS (Corporate/Business - Text Regex)
+# STRATEGY 1: CWS (From your 'MAYBANK CODE CWS' file)
 # ==============================================================================
-def _parse_cws_strategy(pdf_path):
+def _parse_cws(pdf_path):
+    # Regex from your doc
     DATE_PATTERN = re.compile(r"^\d{2}\s+[A-Za-z]{3}\s+\d{4}") # e.g., 01 Mar 2025
-    # Amount pattern: "1,234.56 + 5,000.00" (Amount Sign Balance)
+    # Amount + sign + balance pattern: "78.00 - 47,272.76"
     AMOUNT_PATTERN = re.compile(r'([0-9,]+\.\d{2})\s*([+-])\s*([0-9,]+\.\d{2})')
-    
-    txns = []
+
+    transactions = []
     current_txn = None
     desc_buffer = []
 
@@ -51,69 +52,81 @@ def _parse_cws_strategy(pdf_path):
             if not text: continue
             
             lines = text.split("\n")
+            
             for raw_line in lines:
                 line = raw_line.strip()
                 if not line: continue
 
-                # Detect start of transaction (Date)
+                # Check for Date at start
                 if DATE_PATTERN.match(line):
-                    # Save previous transaction
+                    # Save previous if exists
                     if current_txn:
                         current_txn["description"] = " ".join(desc_buffer).strip()
-                        txns.append(current_txn)
+                        transactions.append(current_txn)
                     
-                    desc_buffer = [] # Reset
-
+                    desc_buffer = []
+                    
                     # Search for Amount/Balance pattern in this line
                     m = AMOUNT_PATTERN.search(line)
                     if not m:
-                        continue # Date found but no numbers, skip
+                        # Date found but no numbers? Reset and continue
+                        current_txn = None 
+                        continue
 
                     # Extract numbers
-                    amt = float(m.group(1).replace(",", ""))
+                    amt_str = m.group(1).replace(",", "")
                     sign = m.group(2)
-                    bal = float(m.group(3).replace(",", ""))
+                    bal_str = m.group(3).replace(",", "")
 
-                    debit = amt if sign == "-" else 0.0
-                    credit = amt if sign == "+" else 0.0
+                    amount = float(amt_str)
+                    balance = float(bal_str)
 
-                    # Description is usually before the numbers
+                    # Logic for Debit/Credit based on Sign
+                    if sign == "-":
+                        debit = amount
+                        credit = 0.0
+                    else:
+                        credit = amount
+                        debit = 0.0
+
+                    # Description is text before the amount pattern
                     desc_text = line[:m.start()].strip()
 
                     current_txn = {
-                        "date": line[:11], # Keep raw date for now
+                        "date": line[:11], # Capture the date string part
                         "description": "",
                         "debit": debit,
                         "credit": credit,
-                        "balance": bal
+                        "balance": balance
                     }
                     desc_buffer.append(desc_text)
                 
                 else:
-                    # Continuation of description
+                    # Continuation line for description
                     if current_txn:
                         desc_buffer.append(line)
     
     # Append last transaction
     if current_txn:
         current_txn["description"] = " ".join(desc_buffer).strip()
-        txns.append(current_txn)
-
-    df = pd.DataFrame(txns)
-    if df.empty: return None
-
-    # Post-process Date
-    df["date"] = pd.to_datetime(df["date"], errors='coerce').dt.strftime('%d/%m/%Y')
+        transactions.append(current_txn)
+    
+    df = pd.DataFrame(transactions)
+    if not df.empty:
+        # Normalize date to DD/MM/YYYY
+        df["date"] = pd.to_datetime(df["date"], format="%d %b %Y", errors='coerce').dt.strftime('%d/%m/%Y')
+        
     return df
 
+
 # ==============================================================================
-# STRATEGY 2: Mytutor (Coordinate/PyMuPDF - Complex Layouts)
+# STRATEGY 2: Mytutor (From your 'Maybank Mytutor code' file)
 # ==============================================================================
-def _parse_mytutor_strategy(pdf_path):
+def _parse_mytutor(pdf_path):
     doc = fitz.open(pdf_path)
     
     # 1. Detect Year
-    statement_year = "2025" # Default
+    statement_year = str(datetime.now().year)
     STATEMENT_DATE_RE = re.compile(r"STATEMENT\s+DATE\s*:?\s*(\d{2})/(\d{2})/(\d{2})")
     
     # Scan first 2 pages for year
@@ -124,142 +137,97 @@ def _parse_mytutor_strategy(pdf_path):
             statement_year = f"20{m.group(3)}"
             break
 
-    # 2. Regex Helpers
+    # 2. Setup Regex
     DATE_RE_A = re.compile(r"^(\d{2}/\d{2}/\d{4}|\d{2}/\d{2}|\d{2}-\d{2}|\d{2}\s+[A-Z]{3})$", re.IGNORECASE)
     AMOUNT_RE_A = re.compile(r"^(?:\d{1,3}(?:,\d{3})*|\d+)?\.\d{2}[+-]?$")
 
-    def norm_date(token, year):
-        token = token.strip().upper()
-        formats = [
-            ("%d/%m/%Y", None),
-            ("%d/%m", f"/%Y"), 
-            ("%d-%m", f"-%Y"), 
-            ("%d %b", f" %Y")
-        ]
-        
-        for fmt, suffix in formats:
-            try:
-                parse_str = token + ("/" + year if suffix else "")
-                parse_fmt = fmt + (suffix if suffix else "")
-                if suffix: # Adjust parse string for suffix logic
-                     parse_str = token + "/" + year
-                     parse_fmt = fmt + "/%Y"
-                
-                # Simplified date parsing
-                if fmt == "%d/%m/%Y":
-                    dt = datetime.strptime(token, fmt)
-                else:
-                    dt = datetime.strptime(f"{token}/{year}", fmt + "/%Y")
-                return dt.strftime("%Y-%m-%d")
-            except:
-                continue
-        return None
-
-    def parse_amt(t):
-        t = t.strip()
-        sign = "+" if t.endswith("+") else "-" if t.endswith("-") else None
-        # Clean cleanup
-        clean_t = t.replace(",", "").replace("CR","").replace("DR","").rstrip("+-")
-        try:
-            v = float(clean_t)
-        except:
-            v = 0.0
-        return v, sign
-
     transactions = []
-    previous_balance = None
     processed_y = set()
-    Y_TOL = 2.0 # Tolerance for same line
+    previous_balance = None
 
     for page in doc:
         words = page.get_text("words")
-        # word structure: (x0, y0, x1, y1, text, block_no, line_no, word_no)
-        # We need a dict list
+        # Extract rows based on Y coordinates
         rows = [{"x0": w[0], "y0": w[1], "text": str(w[4]).strip()} for w in words if str(w[4]).strip()]
         rows.sort(key=lambda r: (round(r["y0"], 1), r["x0"]))
 
         for r in rows:
             token = r["text"]
-            # Check if this token looks like a date
+            # Check if token matches Date regex
             if not DATE_RE_A.match(token): continue
-
-            y_ref = r["y0"]
-            y_bucket = round(y_ref, 1)
             
-            # Avoid processing the same line twice
-            if any(abs(y - y_bucket) < 0.5 for y in processed_y): continue
+            y_ref = round(r["y0"], 1)
+            # Skip if we already processed this Y-line
+            if any(abs(y - y_ref) < 0.5 for y in processed_y): continue 
 
-            # Get all words on this line
-            line = [w for w in rows if abs(w["y0"] - y_ref) <= Y_TOL]
+            # Gather all words on this line (tolerance 2.0)
+            line = [w for w in rows if abs(w["y0"] - r["y0"]) <= 2.0]
             line.sort(key=lambda w: w["x0"])
 
-            # Verify date
-            date_iso = norm_date(token, statement_year)
-            if not date_iso: continue
-            
-            # Format date for display
-            try:
-                date_display = datetime.strptime(date_iso, "%Y-%m-%d").strftime("%d/%m/%Y")
-            except:
-                date_display = token
-
-            # Extract content
-            desc_parts = []
+            # Separate Amounts from Description
             amounts = []
-            
+            desc_parts = []
             for w in line:
                 if w["text"] == token: continue # Skip the date token itself
                 if AMOUNT_RE_A.match(w["text"]):
                     amounts.append((w["x0"], w["text"]))
                 else:
                     desc_parts.append(w["text"])
-
+            
             if not amounts: continue
 
-            # Sort amounts by X position (Balance is usually last)
+            # Helper to parse "1,000.00+" or "1,000.00CR"
+            def parse_val(s):
+                clean = s.replace(",", "").replace("CR","").replace("DR","")
+                sign = "+" if clean.endswith("+") else "-" if clean.endswith("-") else ""
+                clean = clean.rstrip("+-")
+                try: v = float(clean)
+                except: v = 0.0
+                return v, sign
+
+            # Last amount is typically Balance
             amounts.sort(key=lambda a: a[0])
+            balance_val, _ = parse_val(amounts[-1][1])
             
-            # Identify Balance (Last one)
-            balance_val, _ = parse_amt(amounts[-1][1])
-            
-            # Identify Transaction Amount (2nd to last if exists)
-            txn_val, txn_sign = 0.0, None
+            # 2nd last is Transaction Amount
+            txn_val = 0.0
+            txn_sign = ""
             if len(amounts) > 1:
-                txn_val, txn_sign = parse_amt(amounts[-2][1])
+                txn_val, txn_sign = parse_val(amounts[-2][1])
             
-            description = " ".join(desc_parts).strip()
-
-            # Logic to determine Debit vs Credit
-            debit, credit = 0.0, 0.0
+            # Logic: Debit vs Credit
+            debit = 0.0
+            credit = 0.0
             
-            # Method A: Use math delta if we have previous balance
-            if previous_balance is not None:
-                delta = round(balance_val - previous_balance, 2)
-                if delta > 0:
-                    credit = abs(delta)
-                elif delta < 0:
-                    debit = abs(delta)
-                else:
-                    # No change? check explicit transaction value
-                    if txn_sign == "+": credit = txn_val
-                    elif txn_sign == "-": debit = txn_val
+            # Logic A: Explicit Sign in Text
+            if txn_sign == "-": debit = txn_val
+            elif txn_sign == "+": credit = txn_val
             else:
-                # Method B: First row (no prev balance), rely on signs or keywords
-                if txn_sign == "+": credit = txn_val
-                elif txn_sign == "-": debit = txn_val
+                # Logic B: Math Check (Delta from previous balance)
+                if previous_balance is not None:
+                    delta = round(balance_val - previous_balance, 2)
+                    if delta < 0: debit = abs(delta)
+                    elif delta > 0: credit = abs(delta)
+                    else: debit = txn_val # Fallback
                 else:
-                    # Fallback keywords
-                    if any(x in description.upper() for x in ["DEPOSIT", "TRANSFER FROM", "CREDIT"]):
-                        credit = txn_val
-                    else:
-                        debit = txn_val # Assume debit by default for first row if unclear
+                    # Logic C: First row fallback
+                    debit = txn_val # Default assumption
 
-            processed_y.add(y_bucket)
             previous_balance = balance_val
+            processed_y.add(y_ref)
+            
+            # Format Date for display
+            date_display = token
+            # Try to fix partial dates (DD/MM) using found year
+            if len(token) <= 5 and "/" in token:
+                 try:
+                     dt = datetime.strptime(f"{token}/{statement_year}", "%d/%m/%Y")
+                     date_display = dt.strftime("%d/%m/%Y")
+                 except: pass
 
             transactions.append({
                 "date": date_display,
-                "description": description,
+                "description": " ".join(desc_parts),
                 "debit": debit,
                 "credit": credit,
                 "balance": balance_val
