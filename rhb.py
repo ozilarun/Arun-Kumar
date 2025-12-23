@@ -194,7 +194,15 @@ txn_pattern = re.compile(
 def num(x):
     if not x:
         return 0.0
-    return float(x.replace(",", "").replace("+", "").replace("-", ""))
+
+    x = x.strip()
+
+    # Handle trailing + or -
+    sign = -1 if x.endswith("-") or x.startswith("-") else 1
+
+    x = x.replace(",", "").replace("+", "").replace("-", "")
+    return sign * float(x)
+
 
 
 def parse_transactions(text, page_num):
