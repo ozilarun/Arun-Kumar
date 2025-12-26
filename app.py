@@ -228,10 +228,23 @@ if st.button("Run Analysis", type="primary"):
 
     months = split_by_month(df_all)
 
-    st.subheader("📂 Monthly Breakdown (Audit)")
-    for month, mdf in months.items():
-        with st.expander(f"Show {month}"):
-            st.dataframe(mdf, use_container_width=True)
+st.subheader("📂 Monthly Breakdown (Audit)")
+
+for month, mdf in months.items():
+    with st.expander(f"Show {month}"):
+
+        st.dataframe(mdf, use_container_width=True)
+
+        # 🔽 TXT EXPORT (THIS IS WHAT YOU WANT)
+        txt_data = df_to_txt(mdf, month)
+
+        st.download_button(
+            label=f"⬇️ Download {month} as TXT",
+            data=txt_data.encode("utf-8"),
+            file_name=f"{month.replace(' ', '_')}_transactions.txt",
+            mime="text/plain"
+        )
+
 
     monthly_summary = compute_monthly_summary(
         months,
