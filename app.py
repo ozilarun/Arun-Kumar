@@ -31,6 +31,12 @@ st.title("🏦 Bank Statement Analysis")
 if "months" not in st.session_state:
     st.session_state.months = None
 
+if "monthly_summary" not in st.session_state:
+    st.session_state.monthly_summary = None
+
+if "ratio_df" not in st.session_state:
+    st.session_state.ratio_df = None
+
 # =====================================================
 # BANK SELECTION
 # =====================================================
@@ -78,8 +84,14 @@ for i, uploaded_file in enumerate(uploaded_files):
 
         if df is not None and not df.empty:
             try:
-                df["_sort_temp"] = pd.to_datetime(df["date"], dayfirst=True, errors="coerce")
-                df = df.sort_values("_sort_temp").drop(columns="_sort_temp").reset_index(drop=True)
+                df["_sort_temp"] = pd.to_datetime(
+                    df["date"], dayfirst=True, errors="coerce"
+                )
+                df = (
+                    df.sort_values("_sort_temp")
+                    .drop(columns="_sort_temp")
+                    .reset_index(drop=True)
+                )
             except:
                 pass
 
@@ -151,7 +163,12 @@ def compute_monthly_summary(all_months, od_limit):
         first_txn = df.iloc[0]
         last_txn = df.iloc[-1]
 
-        opening = compute_opening_balance_from_row(first_txn) if prev_ending is None else prev_ending
+        opening = (
+            compute_opening_balance_from_row(first_txn)
+            if prev_ending is None
+            else prev_ending
+        )
+
         ending = last_txn["balance"]
 
         rows.append({
@@ -209,31 +226,50 @@ def df_to_txt(df, month_label):
     return "\n".join(lines)
 
 # =====================================================
-# RUN ANALYSIS
+# RUN ANALYSIS (BUTTON)
 # =====================================================
 if st.button("Run Analysis", type="primary"):
 
     st.session_state.months = split_by_month(df_all)
 
+    st.session_state.monthly_summary = compute_monthly_summary(
+        st.session_state.months, OD_LIMIT
+    )
+
+    st.session_state.ratio_df = compute_ratios(
+        st.session_state.monthly_summary, OD_LIMIT
+    )
+
+# =====================================================
+# MONTHLY BREAKDOWN + TXT DOWNLOADS
+# =====================================================
+if st.session_state.months:
+
     st.subheader("📂 Monthly Breakdown (Audit)")
+
     for month, mdf in st.session_state.months.items():
+
         with st.expander(f"Show {month}"):
 
             st.dataframe(mdf, use_container_width=True)
 
             txt_data = df_to_txt(mdf, month)
+
             st.download_button(
                 label=f"⬇️ Download {month} as TXT",
-                data=txt_data.encode("utf-8"),
+                data=txt_data,
                 file_name=f"{month.replace(' ', '_')}_transactions.txt",
-                mime="text/plain"
+                mime="text/plain",
+                key=f"download_{month}"
             )
 
-    monthly_summary = compute_monthly_summary(st.session_state.months, OD_LIMIT)
-    ratio_df = compute_ratios(monthly_summary, OD_LIMIT)
+# =====================================================
+# SUMMARY OUTPUTS
+# =====================================================
+if st.session_state.monthly_summary is not None:
 
     st.subheader("📅 Monthly Summary")
-    st.dataframe(monthly_summary, use_container_width=True)
+    st.dataframe(st.session_state.monthly_summary, use_container_width=True)
 
     st.subheader("📊 Financial Ratios")
-    st.dataframe(ratio_df, use_container_width=True)
+    st.dataframe(st.session_state.ratio_df, use_container_width=True)
