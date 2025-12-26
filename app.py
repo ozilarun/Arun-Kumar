@@ -2,36 +2,18 @@ import streamlit as st
 import tempfile
 import pandas as pd
 from io import BytesIO
-
 from openpyxl import Workbook
+from openpyxl.styles import Font, PatternFill
 from openpyxl.utils.dataframe import dataframe_to_rows
 
-# =====================================================
+# ===============================
 # BANK IMPORTS (DO NOT TOUCH)
-# =====================================================
-try:
-    from bank_rakyat import extract_bank_rakyat
-    from bank_islam import extract_bank_islam
-    from cimb import extract_cimb
-    from maybank import extract_maybank
-    from rhb import extract_rhb
-except ImportError as e:
-    st.error(f"Missing bank file: {e}")
-    st.stop()
-
-# =====================================================
-# PAGE CONFIG
-# =====================================================
-st.set_page_config(page_title="Bank Statement Analysis", layout="wide")
-st.title("🏦 Bank Statement Analysis")
-
-# =====================================================
-# BANK SELECTION
-# =====================================================
-bank_choice = st.selectbox(
-    "Select Bank",
-    ["Bank Rakyat", "Bank Islam", "CIMB", "Maybank", "RHB"]
-)
+# ===============================
+from bank_rakyat import extract_bank_rakyat
+from bank_islam import extract_bank_islam
+from cimb import extract_cimb
+from maybank import extract_maybank
+from rhb import extract_rhb
 
 BANK_EXTRACTORS = {
     "Bank Rakyat": extract_bank_rakyat,
@@ -41,177 +23,221 @@ BANK_EXTRACTORS = {
     "RHB": extract_rhb,
 }
 
-# =====================================================
-# FILE UPLOAD
-# =====================================================
+# ===============================
+# PAGE CONFIG
+# ===============================
+st.set_page_config(page_title="Bank Statement Analysis", layout="wide")
+st.title("🏦 Bank Statement Analysis")
+
+# ===============================
+# INPUTS
+# ===============================
+bank_choice = st.selectbox("Select Bank", list(BANK_EXTRACTORS.keys()))
 uploaded_files = st.file_uploader(
     "Upload Bank Statement PDF(s)",
     type=["pdf"],
     accept_multiple_files=True
 )
 
+OD_LIMIT = st.number_input("Enter OD Limit (RM)", min_value=0.0, step=1000.0)
+
 if not uploaded_files:
     st.stop()
 
-# =====================================================
-# EXTRACT DATA
-# =====================================================
+# ===============================
+# EXTRACT ALL TRANSACTIONS
+# ===============================
 extractor = BANK_EXTRACTORS[bank_choice]
 all_dfs = []
 
-progress = st.progress(0)
-
-for i, f in enumerate(uploaded_files):
+for f in uploaded_files:
     with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
         tmp.write(f.read())
         path = tmp.name
 
     df = extractor(path)
-
     if df is not None and not df.empty:
         df["_dt"] = pd.to_datetime(df["date"], dayfirst=True, errors="coerce")
-        df = df.dropna(subset=["_dt"]).sort_values("_dt")
-        df = df.drop(columns="_dt").reset_index(drop=True)
+        df = df.dropna(subset=["_dt"]).sort_values("_dt").drop(columns="_dt")
         all_dfs.append(df)
-
-    progress.progress((i + 1) / len(uploaded_files))
-
-if not all_dfs:
-    st.error("No transactions extracted.")
-    st.stop()
 
 df_all = pd.concat(all_dfs, ignore_index=True)
 
-st.subheader("📄 Cleaned Transactions")
+st.subheader("📄 Cleaned Transaction List")
 st.dataframe(df_all, use_container_width=True)
 
-# =====================================================
-# OD LIMIT
-# =====================================================
-OD_LIMIT = st.number_input("Enter OD Limit (RM)", min_value=0.0, step=1000.0)
-
-# =====================================================
+# ===============================
 # HELPERS
-# =====================================================
-def compute_opening(row):
-    return row["balance"] - row["credit"] + row["debit"]
-
+# ===============================
 def split_by_month(df):
-    df["_dt"] = pd.to_datetime(df["date"], dayfirst=True)
+    df["_dt"] = pd.to_datetime(df["date"], dayfirst=True, errors="coerce")
+    df = df.dropna(subset=["_dt"])
+
     months = {}
-    for p, g in df.groupby(df["_dt"].dt.to_period("M")):
-        months[p.strftime("%b %Y")] = g.drop(columns="_dt").reset_index(drop=True)
+    for m, g in df.groupby(df["_dt"].dt.to_period("M")):
+        label = m.strftime("%b %Y")
+        months[label] = g.drop(columns="_dt").reset_index(drop=True)
+
     return dict(sorted(months.items()))
 
-def compute_monthly_summary(months):
-    rows = []
-    prev_end = None
+def opening_from_first_row(r):
+    return r["balance"] - r["credit"] + r["debit"]
 
-    for m, df in months.items():
-        first, last = df.iloc[0], df.iloc[-1]
-        opening = compute_opening(first) if prev_end is None else prev_end
-        ending = last["balance"]
+# ===============================
+# TXT FORMAT (EXACT STYLE)
+# ===============================
+def month_to_txt(df, month_label):
+    W_DATE, W_DESC, W_DEBIT, W_CREDIT, W_BAL = 12, 60, 15, 15, 15
 
-        rows.append({
-            "Month": m,
-            "Opening": opening,
-            "Debit": df["debit"].sum(),
-            "Credit": df["credit"].sum(),
-            "Ending": ending,
-            "Highest": df["balance"].max(),
-            "Lowest": df["balance"].min(),
-            "Swing": abs(df["balance"].max() - df["balance"].min()),
-            "OD Util (RM)": abs(ending) if ending < 0 else 0,
-            "OD %": (abs(ending) / OD_LIMIT * 100) if OD_LIMIT > 0 and ending < 0 else 0
-        })
+    def fmt(x): return f"{float(x):,.2f}"
 
-        prev_end = ending
+    def line(ch="-"):
+        return (
+            f"+{ch*(W_DATE+2)}"
+            f"+{ch*(W_DESC+2)}"
+            f"+{ch*(W_DEBIT+2)}"
+            f"+{ch*(W_CREDIT+2)}"
+            f"+{ch*(W_BAL+2)}+"
+        )
 
-    return pd.DataFrame(rows)
+    out = []
+    out.append(f">>> {month_label.upper()}")
+    out.append(line())
+    out.append(
+        f"| {'Date':^{W_DATE}} | {'Description':<{W_DESC}} | "
+        f"{'Debit':>{W_DEBIT}} | {'Credit':>{W_CREDIT}} | {'Balance':>{W_BAL}} |"
+    )
+    out.append(line("="))
 
-def compute_ratios(df):
-    ratio = {}
-    ratio["Total Credit (6 Months)"] = df["Credit"].sum()
-    ratio["Total Debit (6 Months)"] = df["Debit"].sum()
-    ratio["Annualized Credit"] = ratio["Total Credit (6 Months)"] * 2
-    ratio["Annualized Debit"] = ratio["Total Debit (6 Months)"] * 2
-    ratio["Average Opening Balance"] = df["Opening"].mean()
-    ratio["Average Ending Balance"] = df["Ending"].mean()
-    ratio["Highest Balance (Period)"] = df["Highest"].max()
-    ratio["Lowest Balance (Period)"] = df["Lowest"].min()
-    ratio["Average OD Utilization (RM)"] = df["OD Util (RM)"].mean()
-    ratio["Average % OD Utilization"] = df["OD %"].mean()
-    ratio["Average Monthly Swing (RM)"] = df["Swing"].mean()
-    ratio["% of Swing"] = (ratio["Average Monthly Swing (RM)"] / OD_LIMIT * 100) if OD_LIMIT > 0 else 0
-    ratio["Returned Cheques"] = 0
-    ratio["Number of Excesses"] = int((df["OD Util (RM)"] > OD_LIMIT).sum()) if OD_LIMIT > 0 else 0
+    for _, r in df.iterrows():
+        out.append(
+            f"| {r['date']:<{W_DATE}} | {r['description'][:W_DESC]:<{W_DESC}} | "
+            f"{fmt(r['debit']):>{W_DEBIT}} | "
+            f"{fmt(r['credit']):>{W_CREDIT}} | "
+            f"{fmt(r['balance']):>{W_BAL}} |"
+        )
+        out.append(line())
 
-    return pd.DataFrame(ratio.items(), columns=["Metric", "Value"])
+    return "\n".join(out)
 
-# =====================================================
+# ===============================
 # RUN ANALYSIS
-# =====================================================
+# ===============================
 if st.button("Run Analysis", type="primary"):
 
     months = split_by_month(df_all)
 
-    # -------- MONTHLY BREAKDOWN (TXT) --------
+    # ---------------------------
+    # MONTHLY BREAKDOWN (TXT)
+    # ---------------------------
     st.subheader("📂 Monthly Breakdown (Audit)")
-    txt_blocks = []
-
-    for m, mdf in months.items():
-        with st.expander(f"Show {m}"):
+    for month, mdf in months.items():
+        with st.expander(f"Show {month}"):
             st.dataframe(mdf, use_container_width=True)
 
-        lines = [f">>> {m.upper()}", "-" * 120]
-        lines.append("Date | Description | Debit | Credit | Balance")
-        lines.append("-" * 120)
-
-        for _, r in mdf.iterrows():
-            lines.append(
-                f"{r['date']} | {str(r['description'])[:50]} | "
-                f"{r['debit']:.2f} | {r['credit']:.2f} | {r['balance']:.2f}"
+            txt = month_to_txt(mdf, month)
+            st.download_button(
+                f"⬇ Download {month} TXT",
+                data=txt,
+                file_name=f"{month.replace(' ', '_')}.txt",
+                mime="text/plain"
             )
 
-        txt_blocks.append("\n".join(lines))
+    # ---------------------------
+    # MONTHLY SUMMARY
+    # ---------------------------
+    rows = []
+    prev_end = None
 
-    txt_report = "\n\n".join(txt_blocks)
+    for month, mdf in months.items():
+        first, last = mdf.iloc[0], mdf.iloc[-1]
 
-    st.download_button(
-        "📄 Download Monthly Breakdown (TXT)",
-        txt_report,
-        "monthly_breakdown.txt",
-        "text/plain"
-    )
+        opening = opening_from_first_row(first) if prev_end is None else prev_end
+        ending = last["balance"]
 
-    # -------- SUMMARY + RATIOS --------
-    summary_df = compute_monthly_summary(months)
-    ratio_df = compute_ratios(summary_df)
+        rows.append({
+            "Month": month,
+            "Opening": opening,
+            "Debit": mdf["debit"].sum(),
+            "Credit": mdf["credit"].sum(),
+            "Ending": ending,
+            "Highest": mdf["balance"].max(),
+            "Lowest": mdf["balance"].min(),
+            "Swing": abs(mdf["balance"].max() - mdf["balance"].min()),
+            "OD Util (RM)": abs(ending) if ending < 0 else 0,
+            "OD %": (abs(ending) / OD_LIMIT * 100) if ending < 0 and OD_LIMIT > 0 else 0
+        })
 
-    st.subheader("📅 Monthly Summary")
+        prev_end = ending
+
+    summary_df = pd.DataFrame(rows)
+
+    st.subheader("📅 Summary Table")
     st.dataframe(summary_df, use_container_width=True)
+
+    # ---------------------------
+    # FINANCIAL RATIOS (FULL)
+    # ---------------------------
+    ratio = {}
+    ratio["Total Credit (6 Months)"] = summary_df["Credit"].sum()
+    ratio["Total Debit (6 Months)"] = summary_df["Debit"].sum()
+    ratio["Annualized Credit"] = ratio["Total Credit (6 Months)"] * 2
+    ratio["Annualized Debit"] = ratio["Total Debit (6 Months)"] * 2
+    ratio["Average Opening Balance"] = summary_df["Opening"].mean()
+    ratio["Average Ending Balance"] = summary_df["Ending"].mean()
+    ratio["Highest Balance (Period)"] = summary_df["Highest"].max()
+    ratio["Lowest Balance (Period)"] = summary_df["Lowest"].min()
+    ratio["Average OD Utilization (RM)"] = summary_df["OD Util (RM)"].mean()
+    ratio["Average % OD Utilization"] = summary_df["OD %"].mean()
+    ratio["Average Monthly Swing (RM)"] = summary_df["Swing"].mean()
+    ratio["% of Swing"] = (
+        ratio["Average Monthly Swing (RM)"] / OD_LIMIT * 100
+        if OD_LIMIT > 0 else 0
+    )
+    ratio["Returned Cheques"] = 0
+    ratio["Number of Excesses"] = int(
+        (summary_df["OD Util (RM)"] > OD_LIMIT).sum()
+    ) if OD_LIMIT > 0 else 0
+
+    ratio_df = pd.DataFrame(ratio.items(), columns=["Metric", "Value"])
 
     st.subheader("📊 Financial Ratios")
     st.dataframe(ratio_df, use_container_width=True)
 
-    # -------- EXCEL EXPORT --------
-    output = BytesIO()
+    # ---------------------------
+    # EXCEL EXPORT
+    # ---------------------------
     wb = Workbook()
+    ws = wb.active
+    ws.title = "Summary"
 
-    ws1 = wb.active
-    ws1.title = "Monthly Summary"
-    for r in dataframe_to_rows(summary_df, index=False, header=True):
-        ws1.append(r)
+    header = PatternFill("solid", fgColor="1F4E78")
+    font = Font(color="FFFFFF", bold=True)
 
-    ws2 = wb.create_sheet("Financial Ratios")
-    for r in dataframe_to_rows(ratio_df, index=False, header=True):
-        ws2.append(r)
+    for r, row in enumerate(dataframe_to_rows(summary_df, index=False, header=True), 1):
+        for c, v in enumerate(row, 1):
+            cell = ws.cell(row=r, column=c, value=v)
+            if r == 1:
+                cell.fill = header
+                cell.font = font
 
-    wb.save(output)
+    start = ws.max_row + 3
+    ws.cell(row=start, column=1, value="Financial Ratios").font = Font(bold=True)
+
+    for r, row in enumerate(
+        dataframe_to_rows(ratio_df, index=False, header=True),
+        start + 1
+    ):
+        for c, v in enumerate(row, 1):
+            ws.cell(row=r, column=c, value=v)
+
+    bio = BytesIO()
+    wb.save(bio)
+    bio.seek(0)
 
     st.download_button(
-        "📊 Download Summary + Ratios (Excel)",
-        output.getvalue(),
-        "bank_analysis.xlsx",
-        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        "⬇ Download Summary + Ratios (Excel)",
+        data=bio,
+        file_name="Bank_Statement_Analysis.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )
