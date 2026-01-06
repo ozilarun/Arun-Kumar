@@ -14,6 +14,7 @@ from bank_islam import extract_bank_islam
 from cimb import extract_cimb
 from maybank import extract_maybank
 from rhb import extract_rhb
+from ambank import extract_ambank
 
 BANK_EXTRACTORS = {
     "Bank Rakyat": extract_bank_rakyat,
@@ -21,6 +22,7 @@ BANK_EXTRACTORS = {
     "CIMB": extract_cimb,
     "Maybank": extract_maybank,
     "RHB": extract_rhb,
+    "Ambank": extract_ambank,
 }
 
 # ===============================
