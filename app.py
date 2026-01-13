@@ -5,6 +5,7 @@ from io import BytesIO
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill
 from openpyxl.utils.dataframe import dataframe_to_rows
+import re
 
 # ===============================
 # BANK IMPORTS
@@ -55,7 +56,7 @@ if not uploaded_files:
     st.stop()
 
 # ===============================
-# EXTRACT PER FILE (CRITICAL FIX)
+# EXTRACT PER FILE
 # ===============================
 extractor = BANK_EXTRACTORS[bank_choice]
 monthly_data = {}
@@ -69,38 +70,31 @@ for f in uploaded_files:
     if df is None or df.empty:
         continue
 
-    # Try to detect month from first valid date
     df["_dt"] = pd.to_datetime(df["date"], dayfirst=True, errors="coerce")
     valid_dates = df["_dt"].dropna()
 
     if not valid_dates.empty:
         period = valid_dates.iloc[0].to_period("M")
     else:
-        # Balance B/F only month → infer from filename
-        import re
+        m = re.search(
+            r"(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC|"
+            r"January|February|March|April|May|June|July|August|"
+            r"September|October|November|December)",
+            f.name,
+            re.IGNORECASE
+        )
+        if not m:
+            raise ValueError(f"Cannot infer month from filename: {f.name}")
 
-# Try to infer month from filename (e.g. "Statement OCBC - April.pdf")
-m = re.search(
-    r"(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC|January|February|March|April|May|June|July|August|September|October|November|December)",
-    f.name,
-    re.IGNORECASE
-)
-
-if m:
-    month_str = m.group(1)[:3].title()
-    period = pd.to_datetime(f"{month_str} 2023", format="%b %Y").to_period("M")
-else:
-    # absolute last fallback (should not happen)
-    continue
-
+        month_str = m.group(1)[:3].title()
+        period = pd.to_datetime(f"{month_str} 2023", format="%b %Y").to_period("M")
 
     label = period.strftime("%b %Y")
-
     df = df.drop(columns="_dt", errors="ignore").reset_index(drop=True)
     monthly_data[label] = df
 
 # ===============================
-# SORT MONTHS (FINAL AUTHORITY)
+# SORT MONTHS
 # ===============================
 def sort_months(d):
     items = []
@@ -112,7 +106,7 @@ def sort_months(d):
 months = sort_months(monthly_data)
 
 # ===============================
-# DISPLAY CLEANED DATA
+# DISPLAY DATA
 # ===============================
 st.subheader("📄 Extracted Monthly Data")
 for month, df in months:
@@ -120,7 +114,7 @@ for month, df in months:
         st.dataframe(df, use_container_width=True)
 
 # ===============================
-# MONTHLY SUMMARY (BANK-CORRECT)
+# MONTHLY SUMMARY
 # ===============================
 rows = []
 
