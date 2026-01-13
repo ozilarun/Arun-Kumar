@@ -201,7 +201,7 @@ for month, df in months:
         "Highest": round(highest, 2),
         "Lowest": round(lowest, 2),
         "Swing": round(highest - lowest, 2),
-        "OD Util (RM)": round(abs(ending), 2) if ending < 0 else 0,
+        "OD Util (RM)": round(abs(ending), 2) if ending < 0 and OD_LIMIT > 0 else 0,
         "OD %": round(abs(ending) / OD_LIMIT * 100, 2)
         if ending < 0 and OD_LIMIT > 0 else 0
     })
