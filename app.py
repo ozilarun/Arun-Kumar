@@ -56,6 +56,12 @@ if not uploaded_files:
     st.stop()
 
 # ===============================
+# OPENING BALANCE FORMULA (YOUR ORIGINAL)
+# ===============================
+def opening_from_first_row(r):
+    return r["balance"] - r["credit"] + r["debit"]
+
+# ===============================
 # EXTRACT PER FILE
 # ===============================
 extractor = BANK_EXTRACTORS[bank_choice]
@@ -94,7 +100,7 @@ for f in uploaded_files:
     monthly_data[label] = df
 
 # ===============================
-# SORT MONTHS
+# SORT MONTHS (UNCHANGED)
 # ===============================
 def sort_months(d):
     items = []
@@ -114,13 +120,17 @@ for month, df in months:
         st.dataframe(df, use_container_width=True)
 
 # ===============================
-# MONTHLY SUMMARY
+# MONTHLY SUMMARY (ONLY OPENING FIXED)
 # ===============================
 rows = []
 
 for month, df in months:
-    opening = df.iloc[0]["balance"]
-    ending = df.iloc[-1]["balance"]
+    first = df.iloc[0]
+    last = df.iloc[-1]
+
+    opening = opening_from_first_row(first)
+    ending = last["balance"]
+
     highest = df["balance"].max()
     lowest = df["balance"].min()
 
@@ -134,7 +144,8 @@ for month, df in months:
         "Lowest": round(lowest, 2),
         "Swing": round(highest - lowest, 2),
         "OD Util (RM)": round(abs(ending), 2) if ending < 0 else 0,
-        "OD %": round(abs(ending) / OD_LIMIT * 100, 2) if ending < 0 and OD_LIMIT > 0 else 0
+        "OD %": round(abs(ending) / OD_LIMIT * 100, 2)
+        if ending < 0 and OD_LIMIT > 0 else 0
     })
 
 summary_df = pd.DataFrame(rows)
@@ -143,7 +154,7 @@ st.subheader("📅 Summary Table")
 st.dataframe(summary_df, use_container_width=True)
 
 # ===============================
-# FINANCIAL RATIOS
+# FINANCIAL RATIOS (UNCHANGED)
 # ===============================
 ratio = {
     "Total Credit (6 Months)": summary_df["Credit"].sum(),
@@ -159,7 +170,8 @@ ratio = {
     "Average Monthly Swing (RM)": summary_df["Swing"].mean(),
     "% of Swing": (summary_df["Swing"].mean() / OD_LIMIT * 100) if OD_LIMIT > 0 else 0,
     "Returned Cheques": 0,
-    "Number of Excesses": int((summary_df["OD Util (RM)"] > OD_LIMIT).sum()) if OD_LIMIT > 0 else 0
+    "Number of Excesses": int((summary_df["OD Util (RM)"] > OD_LIMIT).sum())
+    if OD_LIMIT > 0 else 0
 }
 
 ratio_df = pd.DataFrame(ratio.items(), columns=["Metric", "Value"])
@@ -168,7 +180,7 @@ st.subheader("📊 Financial Ratios")
 st.dataframe(ratio_df, use_container_width=True)
 
 # ===============================
-# EXCEL EXPORT
+# EXCEL EXPORT (UNCHANGED)
 # ===============================
 wb = Workbook()
 ws = wb.active
