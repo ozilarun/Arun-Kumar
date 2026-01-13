@@ -2,21 +2,46 @@ import pdfplumber
 import pandas as pd
 import re
 
+# ==========================
+# HELPERS
+# ==========================
 
-# ============================================================
-# MAIN UNIVERSAL AMBANK EXTRACTOR
-# ============================================================
+MONTH_MAP = {
+    "JAN": "January", "FEB": "February", "MAR": "March", "MAC": "March",
+    "APR": "April", "MAY": "May", "JUN": "June", "JUL": "July",
+    "AUG": "August", "SEP": "September", "SEPT": "September",
+    "OCT": "October", "NOV": "November", "DEC": "December"
+}
+
+def parse_amount(s):
+    if not s:
+        return 0.0
+    s = s.upper().replace(",", "").strip()
+    neg = "DR" in s
+    s = s.replace("DR", "").replace("CR", "")
+    try:
+        v = float(s)
+        return -v if neg else v
+    except:
+        return 0.0
+
+def clean_date(day, mon, year):
+    return f"{day} {MONTH_MAP.get(mon.upper(), mon)} {year}"
+
+# ==========================
+# MAIN EXTRACTOR
+# ==========================
+
 def extract_ambank(pdf_path):
-
     rows = []
-
-    # ========================================================
-    # CODE 1 — FORMAT 1 (DR / CR suffix, English months)
-    # ========================================================
-    prev_balance = None
     current_tx = None
+    prev_balance = None
 
-    date_pattern_1 = re.compile(r"^(\d{2})\s+([A-Z]{3})\s+(\d{4})")
+    # Detect year from filename (fallback 2024)
+    y = re.search(r"(20\d{2})", pdf_path)
+    year = y.group(1) if y else "2024"
+
+    date_start = re.compile(r"^(\d{2})([A-Za-z]{3})")
 
     with pdfplumber.open(pdf_path) as pdf:
         for page in pdf.pages:
@@ -29,182 +54,104 @@ def extract_ambank(pdf_path):
                 if not line:
                     continue
 
-                m = date_pattern_1.match(line)
+                m = date_start.match(line)
 
-                if m:
-                    day, mon, year = m.groups()
-                    parts = line.split()
-
-                    nums = []
-                    desc = []
-
-                    for i in range(len(parts) - 1, -1, -1):
-                        if re.match(r"[\d,]+\.\d{2}(DR|CR)?$", parts[i]):
-                            nums.insert(0, parts[i])
-                        else:
-                            desc = parts[i + 1:]
-                            break
-
-                    if len(nums) >= 2:
-                        amt = float(nums[0].replace(",", "").replace("DR", "").replace("CR", ""))
-                        bal = float(nums[-1].replace(",", "").replace("DR", "").replace("CR", ""))
-
-                        debit = credit = 0.0
-                        if prev_balance is not None:
-                            diff = round(bal - prev_balance, 2)
-                            if abs(diff - amt) < 0.05:
-                                credit = amt
-                            elif abs(diff + amt) < 0.05:
-                                debit = amt
-
-                        current_tx = {
-                            "date": f"{day} {mon} {year}",
-                            "description": " ".join(desc),
-                            "debit": debit,
-                            "credit": credit,
-                            "balance": bal
-                        }
-                        rows.append(current_tx)
-                        prev_balance = bal
-
-                else:
-                    if current_tx and not re.search(r"\d+\.\d{2}", line):
-                        current_tx["description"] += " " + line
-
-    if rows:
-        return pd.DataFrame(rows, columns=["date", "description", "debit", "credit", "balance"])
-
-    # ========================================================
-    # CODE 2 — FORMAT 2 (Malay months e.g. MAC, continuation)
-    # ========================================================
-    rows = []
-    prev_balance = None
-    current_tx = None
-
-    date_pattern_2 = re.compile(r"^(\d{2})(JAN|FEB|MAC|APR|MEI|JUN|JUL|OGO|SEP|OKT|NOV|DIS)")
-
-    MONTH_FIX = {
-        "MAC": "MAR", "MEI": "MAY", "OGO": "AUG", "OKT": "OCT", "DIS": "DEC"
-    }
-
-    with pdfplumber.open(pdf_path) as pdf:
-        for page in pdf.pages:
-            text = page.extract_text()
-            if not text:
-                continue
-
-            for line in text.splitlines():
-                line = line.strip()
-                if not line:
-                    continue
-
-                m = date_pattern_2.match(line)
-
+                # ======================
+                # NEW TRANSACTION LINE
+                # ======================
                 if m:
                     day, mon = m.groups()
-                    mon = MONTH_FIX.get(mon, mon)
-
                     parts = line.split()
-                    nums = []
-                    desc = []
 
-                    for i in range(len(parts) - 1, -1, -1):
-                        if re.match(r"[\d,]+\.\d{2}$", parts[i]):
+                    nums = []
+                    desc_parts = []
+
+                    # scan from RIGHT → LEFT
+                    for i in range(len(parts)-1, -1, -1):
+                        if re.match(r"[\d,]+\.\d{2}[A-Za-z]*$", parts[i]):
                             nums.insert(0, parts[i])
                         else:
-                            desc = parts[i + 1:]
+                            desc_parts = parts[:i+1]
                             break
 
-                    if len(nums) >= 2:
-                        amt = float(nums[0].replace(",", ""))
-                        bal = float(nums[-1].replace(",", ""))
+                    description = " ".join(desc_parts[1:])
+                    values = [parse_amount(x) for x in nums]
+
+                    # Balance only line (Balance B/F)
+                    if len(values) == 1:
+                        prev_balance = values[0]
+                        continue
+
+                    if len(values) >= 2:
+                        tx_amt = abs(values[0])
+                        balance = values[-1]
 
                         debit = credit = 0.0
+
                         if prev_balance is not None:
-                            diff = round(bal - prev_balance, 2)
-                            if abs(diff - amt) < 0.05:
-                                credit = amt
-                            elif abs(diff + amt) < 0.05:
-                                debit = amt
+                            diff = round(balance - prev_balance, 2)
+                            if abs(diff - tx_amt) < 0.05:
+                                credit = tx_amt
+                            elif abs(diff + tx_amt) < 0.05:
+                                debit = tx_amt
+                            else:
+                                # fallback
+                                if any(k in description.upper() for k in ["CR", "CREDIT", "DEPOSIT", "INWARD"]):
+                                    credit = tx_amt
+                                else:
+                                    debit = tx_amt
+                        else:
+                            if any(k in description.upper() for k in ["CR", "CREDIT", "DEPOSIT", "INWARD"]):
+                                credit = tx_amt
+                            else:
+                                debit = tx_amt
 
                         current_tx = {
-                            "date": f"{day} {mon} 2023",
-                            "description": " ".join(desc),
+                            "date": clean_date(day, mon, year),
+                            "description": description,
                             "debit": debit,
                             "credit": credit,
-                            "balance": bal
+                            "balance": balance
                         }
+
                         rows.append(current_tx)
-                        prev_balance = bal
+                        prev_balance = balance
 
+                # ======================
+                # CONTINUATION LINE
+                # ======================
                 else:
-                    if current_tx and not re.search(r"\d+\.\d{2}", line):
-                        current_tx["description"] += " " + line
+                    if current_tx:
+                        if not re.search(r"\d+\.\d{2}", line) and \
+                           "PAGE" not in line.upper() and \
+                           "STATEMENT" not in line.upper():
+                            current_tx["description"] += " " + line
 
-    if rows:
-        return pd.DataFrame(rows, columns=["date", "description", "debit", "credit", "balance"])
+    df = pd.DataFrame(rows)
 
-    # ========================================================
-    # CODE 3 — FORMAT 3 (Amount + Balance only, infer by diff)
-    # ========================================================
-    rows = []
-    prev_balance = None
-
-    date_pattern_3 = re.compile(r"^(\d{2})\s+([A-Z]{3})")
-
-    with pdfplumber.open(pdf_path) as pdf:
-        for page in pdf.pages:
-            text = page.extract_text()
-            if not text:
-                continue
-
-            for line in text.splitlines():
-                line = line.strip()
-                if not line:
+    # ======================
+    # NO TRANSACTIONS CASE
+    # ======================
+    if df.empty:
+        opening_balance = 0.0
+        with pdfplumber.open(pdf_path) as pdf:
+            for page in pdf.pages:
+                t = page.extract_text()
+                if not t:
                     continue
+                for l in t.splitlines():
+                    if "OPENING BALANCE" in l.upper():
+                        m = re.search(r"([\d,]+\.\d{2})", l)
+                        if m:
+                            opening_balance = float(m.group(1).replace(",", ""))
+                            break
 
-                m = date_pattern_3.match(line)
-                if not m:
-                    continue
-
-                parts = line.split()
-                nums = [p for p in parts if re.match(r"[\d,]+\.\d{2}$", p)]
-
-                if len(nums) == 2:
-                    amt = float(nums[0].replace(",", ""))
-                    bal = float(nums[1].replace(",", ""))
-
-                    debit = credit = 0.0
-                    if prev_balance is not None:
-                        diff = round(bal - prev_balance, 2)
-                        if abs(diff - amt) < 0.05:
-                            credit = amt
-                        elif abs(diff + amt) < 0.05:
-                            debit = amt
-
-                    rows.append({
-                        "date": " ".join(parts[:3]),
-                        "description": " ".join(parts[3:-2]),
-                        "debit": debit,
-                        "credit": credit,
-                        "balance": bal
-                    })
-
-                    prev_balance = bal
-
-    if rows:
-        return pd.DataFrame(rows, columns=["date", "description", "debit", "credit", "balance"])
-
-    # ========================================================
-    # FINAL FALLBACK — NO TRANSACTIONS
-    # ========================================================
-    return pd.DataFrame(
-        [{
+        df = pd.DataFrame([{
             "date": "",
-            "description": "No transactions",
+            "description": "Balance B/F (No transactions)",
             "debit": 0.0,
             "credit": 0.0,
-            "balance": 0.0
-        }],
-        columns=["date", "description", "debit", "credit", "balance"]
-    )
+            "balance": opening_balance
+        }])
+
+    return df
