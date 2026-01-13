@@ -77,7 +77,22 @@ for f in uploaded_files:
         period = valid_dates.iloc[0].to_period("M")
     else:
         # Balance B/F only month → infer from filename
-        period = pd.to_datetime(f.name, errors="coerce").to_period("M")
+        import re
+
+# Try to infer month from filename (e.g. "Statement OCBC - April.pdf")
+m = re.search(
+    r"(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC|January|February|March|April|May|June|July|August|September|October|November|December)",
+    f.name,
+    re.IGNORECASE
+)
+
+if m:
+    month_str = m.group(1)[:3].title()
+    period = pd.to_datetime(f"{month_str} 2023", format="%b %Y").to_period("M")
+else:
+    # absolute last fallback (should not happen)
+    continue
+
 
     label = period.strftime("%b %Y")
 
