@@ -6,21 +6,25 @@ import json
 import os
 import pandas as pd
 
-# ==========================================
+# ===============================
 # CONFIG & HELPERS
-# ==========================================
-
+# ===============================
 TEMP_DIR = "temp_ocr_images"
 os.makedirs(TEMP_DIR, exist_ok=True)
 
-# [ADDED] Helper function required by parse_transactions
 def num(s):
-    """Converts string with commas to float. Returns 0.0 if empty/None."""
+    """
+    Helper to convert string to float (Handles commas and empty values).
+    Required because parse_transactions calls 'num(dr)'.
+    """
     if not s:
         return 0.0
     try:
-        return float(str(s).replace(",", "").strip())
-    except ValueError:
+        clean = str(s).replace(",", "").strip()
+        if not clean or clean == "-":
+            return 0.0
+        return float(clean)
+    except:
         return 0.0
 
 def extract_text(page, page_num):
@@ -53,10 +57,9 @@ def preprocess_rhb_text(text):
 
     return "\n".join(merged)
 
-# ==========================================
-# REGEX PATTERN
-# ==========================================
-
+# ===============================
+# REGEX PATTERN (EXACTLY AS PROVIDED)
+# ===============================
 txn_pattern = re.compile(
     r"""
     (?P<date>\d{2}-\d{2}-\d{4})     # Date
@@ -81,74 +84,57 @@ txn_pattern = re.compile(
     re.VERBOSE | re.DOTALL
 )
 
-# ==========================================
+# ===============================
 # PARSING LOGIC
-# ==========================================
-
+# ===============================
 def parse_transactions(text, page_num):
     text = preprocess_rhb_text(text)
-
     txns = []
 
     for m in txn_pattern.finditer(text):
+        
+        # SAFE extraction
+        body = m.group("body").strip() if m.group("body") else ""
 
-        dr_val = num(m.group("dr"))
-        cr_val = num(m.group("cr"))
-        bal_val = num(m.group("bal"))
+        dr = m.group("dr")
+        cr = m.group("cr")
+        bal = m.group("bal")
 
-        # description cleanup
-        body = m.group("body").strip()
+        dr_val = num(dr) if dr else 0.0
+        cr_val = num(cr) if cr else 0.0
+        bal_val = num(bal) if bal else 0.0
 
-        # remove trailing sender ref if it's obviously numeric-only  
-        # (not required, but cleans some lines)
-    
         txns.append({
             "date": m.group("date"),
             "description": body,
-            "debit": dr_val if dr_val > 0 else 0.0,
-            "credit": cr_val if cr_val > 0 else 0.0,
+            "debit": dr_val,
+            "credit": cr_val,
             "balance": bal_val,
             "page": page_num
         })
 
     return txns
 
-# ==========================================
-# MAIN PROCESSOR
-# ==========================================
-
-def process_rhb_pdf(PDF_PATH):
-    all_txns = []
-
-    print("Processing:", PDF_PATH)
-
-    with pdfplumber.open(PDF_PATH) as pdf:
-        for page_num, page in enumerate(pdf.pages, start=1):
-            print(f"Page {page_num}/{len(pdf.pages)}")
-
-            raw = extract_text(page, page_num)   # your OCR fallback
-            processed = preprocess_rhb_text(raw)
-            txns = parse_transactions(processed, page_num)
-
-            all_txns.extend(txns)
-
-    print("Total transactions extracted:", len(all_txns))
-    return all_txns
-
-# ==========================================
-# APP INTEGRATION WRAPPER
-# ==========================================
+# ===============================
+# WRAPPER FOR APP.PY
+# ===============================
 def extract_rhb(pdf_path):
     """
-    Wrapper function to make the script compatible with app.py
+    Main entry point used by app.py
     """
+    all_txns = []
     try:
-        # Run your exact processing logic
-        txns = process_rhb_pdf(pdf_path)
-        
-        # Convert list of dicts to DataFrame for the app
-        df = pd.DataFrame(txns)
-        return df
+        with pdfplumber.open(pdf_path) as pdf:
+            for i, page in enumerate(pdf.pages):
+                # 1. Get Text
+                raw_text = extract_text(page, i+1)
+                
+                # 2. Parse using your logic
+                page_txns = parse_transactions(raw_text, i+1)
+                
+                all_txns.extend(page_txns)
     except Exception as e:
-        print(f"Error in extract_rhb: {e}")
+        print(f"Error processing RHB: {e}")
         return pd.DataFrame()
+
+    return pd.DataFrame(all_txns)
