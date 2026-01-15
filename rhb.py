@@ -2,9 +2,15 @@ import pdfplumber
 import pandas as pd
 import re
 
-from pdf2image import convert_from_path
-import pytesseract
-from PIL import Image
+def ocr_available():
+    try:
+        from pdf2image import convert_from_path
+        import pytesseract
+        from PIL import Image
+        return True
+    except:
+        return False
+
 
 # ==========================
 # REGEX
@@ -111,7 +117,12 @@ def extract_rhb(pdf_path):
     # ======================
     if not transactions:
         try:
-            images = convert_from_path(pdf_path, dpi=300)
+           if ocr_available():
+    from pdf2image import convert_from_path
+    import pytesseract
+
+    images = convert_from_path(pdf_path, dpi=300)
+
 
             for img in images:
                 gray = img.convert("L")
