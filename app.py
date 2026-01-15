@@ -56,6 +56,12 @@ if not uploaded_files:
     st.stop()
 
 # ===============================
+# OPENING BALANCE FORMULA (YOUR ORIGINAL)
+# ===============================
+def opening_from_first_row(r):
+    return r["balance"] - r["credit"] + r["debit"]
+
+# ===============================
 # EXTRACT PER FILE
 # ===============================
 extractor = BANK_EXTRACTORS[bank_choice]
@@ -94,7 +100,7 @@ for f in uploaded_files:
     monthly_data[label] = df
 
 # ===============================
-# SORT MONTHS
+# SORT MONTHS (UNCHANGED)
 # ===============================
 def sort_months(d):
     items = []
@@ -114,50 +120,32 @@ for month, df in months:
         st.dataframe(df, use_container_width=True)
 
 # ===============================
-# MONTHLY SUMMARY - FIXED LOGIC
+# MONTHLY SUMMARY (ONLY OPENING FIXED)
 # ===============================
 rows = []
-previous_ending = None
 
-for idx, (month, df) in enumerate(months):
+for month, df in months:
     first = df.iloc[0]
     last = df.iloc[-1]
 
-    # CORRECTED: Opening balance logic
-    # For first month: use first row balance - credit + debit
-    # For subsequent months: use previous month's ending balance
-    if idx == 0:
-        opening = first["balance"] - first["credit"] + first["debit"]
-    else:
-        opening = previous_ending
-
+    opening = opening_from_first_row(first)
     ending = last["balance"]
-    
-    # Store for next iteration
-    previous_ending = ending
 
     highest = df["balance"].max()
     lowest = df["balance"].min()
 
-    # Total debit and credit for the month
-    total_debit = df["debit"].sum()
-    total_credit = df["credit"].sum()
-
-    # CORRECTED: OD Utilization (only if balance is negative)
-    od_util_rm = abs(ending) if ending < 0 else 0.0
-    od_percent = (od_util_rm / OD_LIMIT * 100) if OD_LIMIT > 0 and ending < 0 else 0.0
-
     rows.append({
         "Month": month,
         "Opening": round(opening, 2),
-        "Debit": round(total_debit, 2),
-        "Credit": round(total_credit, 2),
+        "Debit": round(df["debit"].sum(), 2),
+        "Credit": round(df["credit"].sum(), 2),
         "Ending": round(ending, 2),
         "Highest": round(highest, 2),
         "Lowest": round(lowest, 2),
         "Swing": round(highest - lowest, 2),
-        "OD Util (RM)": round(od_util_rm, 2),
-        "OD %": round(od_percent, 2)
+        "OD Util (RM)": round(abs(ending), 2) if ending < 0 else 0,
+        "OD %": round(abs(ending) / OD_LIMIT * 100, 2)
+        if ending < 0 and OD_LIMIT > 0 else 0
     })
 
 summary_df = pd.DataFrame(rows)
@@ -166,39 +154,24 @@ st.subheader("📅 Summary Table")
 st.dataframe(summary_df, use_container_width=True)
 
 # ===============================
-# FINANCIAL RATIOS - CORRECTED
+# FINANCIAL RATIOS (UNCHANGED)
 # ===============================
-total_credit_6m = summary_df["Credit"].sum()
-total_debit_6m = summary_df["Debit"].sum()
-avg_opening = summary_df["Opening"].mean()
-avg_ending = summary_df["Ending"].mean()
-highest_period = summary_df["Highest"].max()
-lowest_period = summary_df["Lowest"].min()
-avg_od_util_rm = summary_df["OD Util (RM)"].mean()
-avg_od_percent = summary_df["OD %"].mean()
-avg_swing = summary_df["Swing"].mean()
-
-# Calculate % of Swing
-percent_of_swing = (avg_swing / OD_LIMIT * 100) if OD_LIMIT > 0 else 0.0
-
-# Count number of months where ending balance exceeds OD limit (is more negative than limit)
-num_excesses = int((summary_df["Ending"] < -OD_LIMIT).sum()) if OD_LIMIT > 0 else 0
-
 ratio = {
-    "Total Credit (6 Months)": round(total_credit_6m, 2),
-    "Total Debit (6 Months)": round(total_debit_6m, 2),
-    "Annualized Credit": round(total_credit_6m * 2, 2),
-    "Annualized Debit": round(total_debit_6m * 2, 2),
-    "Average Opening Balance": round(avg_opening, 2),
-    "Average Ending Balance": round(avg_ending, 2),
-    "Highest Balance (Period)": round(highest_period, 2),
-    "Lowest Balance (Period)": round(lowest_period, 2),
-    "Average OD Utilization (RM)": round(avg_od_util_rm, 2),
-    "Average % OD Utilization": round(avg_od_percent, 2),
-    "Average Monthly Swing (RM)": round(avg_swing, 2),
-    "% of Swing": round(percent_of_swing, 2),
+    "Total Credit (6 Months)": summary_df["Credit"].sum(),
+    "Total Debit (6 Months)": summary_df["Debit"].sum(),
+    "Annualized Credit": summary_df["Credit"].sum() * 2,
+    "Annualized Debit": summary_df["Debit"].sum() * 2,
+    "Average Opening Balance": summary_df["Opening"].mean(),
+    "Average Ending Balance": summary_df["Ending"].mean(),
+    "Highest Balance (Period)": summary_df["Highest"].max(),
+    "Lowest Balance (Period)": summary_df["Lowest"].min(),
+    "Average OD Utilization (RM)": summary_df["OD Util (RM)"].mean(),
+    "Average % OD Utilization": summary_df["OD %"].mean(),
+    "Average Monthly Swing (RM)": summary_df["Swing"].mean(),
+    "% of Swing": (summary_df["Swing"].mean() / OD_LIMIT * 100) if OD_LIMIT > 0 else 0,
     "Returned Cheques": 0,
-    "Number of Excesses": num_excesses
+    "Number of Excesses": int((summary_df["OD Util (RM)"] > OD_LIMIT).sum())
+    if OD_LIMIT > 0 else 0
 }
 
 ratio_df = pd.DataFrame(ratio.items(), columns=["Metric", "Value"])
@@ -207,7 +180,7 @@ st.subheader("📊 Financial Ratios")
 st.dataframe(ratio_df, use_container_width=True)
 
 # ===============================
-# EXCEL EXPORT
+# EXCEL EXPORT (UNCHANGED)
 # ===============================
 wb = Workbook()
 ws = wb.active
