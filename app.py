@@ -76,6 +76,16 @@ for f in uploaded_files:
     df = extractor(path)
     if df is None or df.empty:
         continue
+        
+if df.empty:
+    # --- RHB / bank may have balance but no transactions ---
+    df = pd.DataFrame([{
+        "date": "",
+        "description": "Balance B/F (No transactions)",
+        "debit": 0.0,
+        "credit": 0.0,
+        "balance": 0.0
+    }])
 
     df["_dt"] = pd.to_datetime(df["date"], dayfirst=True, errors="coerce")
     valid_dates = df["_dt"].dropna()
