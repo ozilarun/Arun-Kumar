@@ -6,7 +6,6 @@ from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill
 from openpyxl.utils.dataframe import dataframe_to_rows
 import re
-import json
 
 # ===============================
 # BANK IMPORTS
@@ -57,7 +56,7 @@ if not uploaded_files:
     st.stop()
 
 # ===============================
-# OPENING BALANCE FORMULA (UNCHANGED)
+# OPENING BALANCE FORMULA (YOUR ORIGINAL)
 # ===============================
 def opening_from_first_row(r):
     return r["balance"] - r["credit"] + r["debit"]
@@ -76,16 +75,6 @@ for f in uploaded_files:
     df = extractor(path)
     if df is None or df.empty:
         continue
-        
-if df.empty:
-    # --- RHB / bank may have balance but no transactions ---
-    df = pd.DataFrame([{
-        "date": "",
-        "description": "Balance B/F (No transactions)",
-        "debit": 0.0,
-        "credit": 0.0,
-        "balance": 0.0
-    }])
 
     df["_dt"] = pd.to_datetime(df["date"], dayfirst=True, errors="coerce")
     valid_dates = df["_dt"].dropna()
@@ -111,7 +100,7 @@ if df.empty:
     monthly_data[label] = df
 
 # ===============================
-# SORT MONTHS
+# SORT MONTHS (UNCHANGED)
 # ===============================
 def sort_months(d):
     items = []
@@ -123,72 +112,15 @@ def sort_months(d):
 months = sort_months(monthly_data)
 
 # ===============================
-# DISPLAY DATA + TXT & JSON DOWNLOADS
+# DISPLAY DATA
 # ===============================
 st.subheader("📄 Extracted Monthly Data")
-
 for month, df in months:
     with st.expander(month):
         st.dataframe(df, use_container_width=True)
 
-        # -------- TXT FORMAT --------
-        W_DATE, W_DESC, W_DEBIT, W_CREDIT, W_BAL = 12, 60, 15, 15, 15
-
-        def fmt(x):
-            return f"{float(x):,.2f}"
-
-        def line(ch="-"):
-            return (
-                f"+{ch*(W_DATE+2)}"
-                f"+{ch*(W_DESC+2)}"
-                f"+{ch*(W_DEBIT+2)}"
-                f"+{ch*(W_CREDIT+2)}"
-                f"+{ch*(W_BAL+2)}+"
-            )
-
-        txt_lines = []
-        txt_lines.append(f">>> {month.upper()}")
-        txt_lines.append(line())
-        txt_lines.append(
-            f"| {'Date':^{W_DATE}} | {'Description':<{W_DESC}} | "
-            f"{'Debit':>{W_DEBIT}} | {'Credit':>{W_CREDIT}} | {'Balance':>{W_BAL}} |"
-        )
-        txt_lines.append(line("="))
-
-        for _, r in df.iterrows():
-            txt_lines.append(
-                f"| {r['date']:<{W_DATE}} | {r['description'][:W_DESC]:<{W_DESC}} | "
-                f"{fmt(r['debit']):>{W_DEBIT}} | "
-                f"{fmt(r['credit']):>{W_CREDIT}} | "
-                f"{fmt(r['balance']):>{W_BAL}} |"
-            )
-            txt_lines.append(line())
-
-        txt_data = "\n".join(txt_lines)
-
-        # -------- JSON --------
-        json_data = json.dumps(df.to_dict(orient="records"), indent=2)
-
-        col1, col2 = st.columns(2)
-
-        with col1:
-            st.download_button(
-                "⬇ Download TXT",
-                data=txt_data,
-                file_name=f"{month.replace(' ', '_')}.txt",
-                mime="text/plain"
-            )
-
-        with col2:
-            st.download_button(
-                "⬇ Download JSON",
-                data=json_data,
-                file_name=f"{month.replace(' ', '_')}.json",
-                mime="application/json"
-            )
-
 # ===============================
-# MONTHLY SUMMARY (UNCHANGED)
+# MONTHLY SUMMARY (ONLY OPENING FIXED)
 # ===============================
 rows = []
 
@@ -211,27 +143,15 @@ for month, df in months:
         "Highest": round(highest, 2),
         "Lowest": round(lowest, 2),
         "Swing": round(highest - lowest, 2),
-        "OD Util (RM)": round(abs(ending), 2) if ending < 0 and OD_LIMIT > 0 else 0,
+        "OD Util (RM)": round(abs(ending), 2) if ending < 0 else 0,
         "OD %": round(abs(ending) / OD_LIMIT * 100, 2)
         if ending < 0 and OD_LIMIT > 0 else 0
     })
 
-summary_df = pd.DataFrame(
-    rows,
-    columns=[
-        "Month", "Opening", "Debit", "Credit",
-        "Ending", "Highest", "Lowest",
-        "Swing", "OD Util (RM)", "OD %"
-    ]
-)
-
+summary_df = pd.DataFrame(rows)
 
 st.subheader("📅 Summary Table")
 st.dataframe(summary_df, use_container_width=True)
-if summary_df.empty:
-    st.warning("⚠ No valid transactions found for selected files.")
-    st.stop()
-
 
 # ===============================
 # FINANCIAL RATIOS (UNCHANGED)
