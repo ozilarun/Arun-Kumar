@@ -218,6 +218,10 @@ summary_df = pd.DataFrame(
 
 st.subheader("📅 Summary Table")
 st.dataframe(summary_df, use_container_width=True)
+if summary_df.empty:
+    st.warning("⚠ No valid transactions found for selected files.")
+    st.stop()
+
 
 # ===============================
 # FINANCIAL RATIOS (UNCHANGED)
