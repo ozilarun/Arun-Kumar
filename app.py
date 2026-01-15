@@ -149,6 +149,10 @@ for month, df in months:
     })
 
 summary_df = pd.DataFrame(rows)
+if summary_df.empty:
+    st.error("❌ No monthly summary generated. Date parsing failed.")
+    st.stop()
+
 
 st.subheader("📅 Summary Table")
 st.dataframe(summary_df, use_container_width=True)
