@@ -82,15 +82,15 @@ for f in uploaded_files:
     if not valid_dates.empty:
         period = valid_dates.iloc[0].to_period("M")
     else:
-      # ---------- FILENAME FALLBACK (ROBUST) ----------
-# Try numeric month: e.g. "2025 06", "2025-06", "06-2025"
+  # ---------- FILENAME FALLBACK (ROBUST & SAFE) ----------
 m_num = re.search(r"(20\d{2})[^\d]?([01]\d)", f.name)
+
 if m_num:
     year = m_num.group(1)
     month = m_num.group(2)
     period = pd.to_datetime(f"{year}-{month}-01").to_period("M")
+
 else:
-    # Try text month as LAST resort
     m_txt = re.search(
         r"(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC|"
         r"January|February|March|April|May|June|July|August|"
@@ -98,15 +98,17 @@ else:
         f.name,
         re.IGNORECASE
     )
+
     if m_txt:
         month_str = m_txt.group(1)[:3].title()
-        year = re.search(r"(20\d{2})", f.name)
-        year = year.group(1) if year else "2025"
+        y = re.search(r"(20\d{2})", f.name)
+        year = y.group(1) if y else "2025"
         period = pd.to_datetime(f"{month_str} {year}", format="%b %Y").to_period("M")
+
     else:
-        # FINAL SAFETY: skip file instead of crashing
-        st.warning(f"⚠ Cannot infer month for {f.name}, skipping file")
+        st.warning(f"⚠ Cannot infer month from filename: {f.name}")
         continue
+
 
 
     label = period.strftime("%b %Y")
