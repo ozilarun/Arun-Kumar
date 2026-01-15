@@ -1,213 +1,143 @@
-# =====================================================
-# MAYBANK.PY – COMBINED & STREAMLIT SAFE
-# =====================================================
-
-import re
-import fitz  # PyMuPDF
 import pdfplumber
 import pandas as pd
+import re
 from datetime import datetime
 
+# ==================================================
+# HELPERS
+# ==================================================
 
-# =====================================================
-# 1️⃣ PYMuPDF WORD-BASED EXTRACTOR (MTASB / MYTUTOR)
-# (LOGIC UNCHANGED)
-# =====================================================
+def to_float(v):
+    try:
+        return float(str(v).replace(",", "").strip())
+    except:
+        return 0.0
 
-def _extract_maybank_pymupdf(pdf_path):
 
-    doc = fitz.open(pdf_path)
+def clean_date(s):
+    s = str(s).strip()
+    for fmt in ("%d/%m/%Y", "%d-%m-%Y", "%d %b %Y"):
+        try:
+            return datetime.strptime(s, fmt).strftime("%d %b %Y")
+        except:
+            pass
+    return s
 
-    # Detect statement year
-    statement_year = "2025"
-    STATEMENT_DATE_RE = re.compile(r"STATEMENT\s+DATE\s*:?\s*(\d{2})/(\d{2})/(\d{2})")
 
-    for p in range(min(2, len(doc))):
-        txt = doc[p].get_text("text").upper()
-        m = STATEMENT_DATE_RE.search(txt)
-        if m:
-            statement_year = f"20{m.group(3)}"
-            break
+# ==================================================
+# FORMAT A — MAYBANK BUSINESS / CWS
+# ==================================================
 
-    DATE_RE = re.compile(r"^(\d{2}/\d{2}/\d{4}|\d{2}/\d{2}|\d{2}-\d{2}|\d{2}\s+[A-Z]{3})$")
-    AMT_RE = re.compile(r"^(?:\d{1,3}(?:,\d{3})*|\d+)?\.\d{2}[+-]?$")
+def extract_format_a(table):
+    rows = []
 
-    def norm_date(token):
-        token = token.strip().upper()
-        for fmt in ("%d/%m/%Y", "%d/%m", "%d-%m", "%d %b"):
-            try:
-                if fmt == "%d/%m/%Y":
-                    dt = datetime.strptime(token, fmt)
-                else:
-                    dt = datetime.strptime(f"{token}/{statement_year}", fmt + "/%Y")
-                return dt.strftime("%d/%m/%Y")
-            except:
-                pass
+    headers = [str(h).lower() if h else "" for h in table[0]]
+
+    if not ("date" in headers and "balance" in headers):
         return None
 
-    def parse_amt(t):
-        sign = "+" if t.endswith("+") else "-" if t.endswith("-") else None
-        v = float(t.replace(",", "").rstrip("+-"))
-        return v, sign
+    for r in table[1:]:
+        if not r or all(c in [None, ""] for c in r):
+            continue
 
-    transactions = []
-    prev_balance = None
+        try:
+            date = r[0]
+            desc = r[1]
+            debit = r[2]
+            credit = r[3]
+            balance = r[4]
 
-    for page in doc:
-        words = page.get_text("words")
-        rows = [{"x": w[0], "y": w[1], "t": w[4].strip()} for w in words if w[4].strip()]
-        rows.sort(key=lambda r: (round(r["y"], 1), r["x"]))
+            rows.append({
+                "date": clean_date(date),
+                "description": str(desc).replace("\n", " ").strip(),
+                "debit": to_float(debit),
+                "credit": to_float(credit),
+                "balance": to_float(balance),
+            })
+        except:
+            continue
 
-        used_y = set()
-        for r in rows:
-            if not DATE_RE.match(r["t"]):
-                continue
+    return rows if rows else None
 
-            y = round(r["y"], 1)
-            if y in used_y:
-                continue
 
-            line = [w for w in rows if abs(w["y"] - r["y"]) <= 1.8]
-            line.sort(key=lambda w: w["x"])
+# ==================================================
+# FORMAT B — MAYBANK RETAIL / MYTUTOR
+# ==================================================
 
-            date = norm_date(r["t"])
-            if not date:
-                continue
+def extract_format_b(table):
+    rows = []
 
-            desc, amts = [], []
-            for w in line:
-                if w["t"] == r["t"]:
-                    continue
-                if AMT_RE.match(w["t"]):
-                    amts.append((w["x"], w["t"]))
-                else:
-                    desc.append(w["t"])
+    for r in table:
+        if not r or len(r) < 5:
+            continue
 
-            if not amts:
-                continue
+        date = r[0]
+        if not re.search(r"\d{1,2}/\d{1,2}/\d{4}", str(date)):
+            continue
 
-            amts.sort(key=lambda a: a[0])
-            bal, _ = parse_amt(amts[-1][1])
+        try:
+            desc = r[1]
+            amount = to_float(r[2])
+            bal = to_float(r[-1])
 
-            txn_val, txn_sign = (None, None)
-            if len(amts) > 1:
-                txn_val, txn_sign = parse_amt(amts[-2][1])
-
-            debit, credit = 0.0, 0.0
-            if prev_balance is not None:
-                delta = round(bal - prev_balance, 2)
-                if delta > 0:
-                    credit = delta
-                elif delta < 0:
-                    debit = abs(delta)
-                else:
-                    if txn_sign == "+":
-                        credit = txn_val
-                    elif txn_sign == "-":
-                        debit = txn_val
+            debit = credit = 0.0
+            if amount < 0:
+                debit = abs(amount)
             else:
-                if txn_sign == "+":
-                    credit = txn_val
-                elif txn_sign == "-":
-                    debit = txn_val
+                credit = amount
 
-            transactions.append({
-                "date": date,
-                "description": " ".join(desc).strip(),
+            rows.append({
+                "date": clean_date(date),
+                "description": str(desc).replace("\n", " ").strip(),
                 "debit": debit,
                 "credit": credit,
-                "balance": bal
+                "balance": bal,
             })
+        except:
+            continue
 
-            prev_balance = bal
-            used_y.add(y)
-
-    return pd.DataFrame(transactions)
+    return rows if rows else None
 
 
-# =====================================================
-# 2️⃣ PDFPLUMBER LINE-BASED EXTRACTOR (CWS FORMAT)
-# (LOGIC UNCHANGED)
-# =====================================================
+# ==================================================
+# MAIN EXTRACTOR
+# ==================================================
 
-DATE_PATTERN = re.compile(r"^\d{2}\s+[A-Za-z]{3}\s+\d{4}")
-AMOUNT_PATTERN = re.compile(r'([0-9,]+\.\d{2})\s*([+-])\s*([0-9,]+\.\d{2})')
-
-def _extract_maybank_pdfplumber(pdf_path):
-
-    txns = []
-    current = None
-    desc_buf = []
+def extract_maybank(pdf_path):
+    rows = []
 
     with pdfplumber.open(pdf_path) as pdf:
         for page in pdf.pages:
-            text = page.extract_text()
-            if not text:
+            table = page.extract_table()
+            if not table:
                 continue
 
-            for raw in text.split("\n"):
-                line = raw.strip()
-                if not line:
-                    continue
+            # Try Format A
+            result = extract_format_a(table)
+            if result:
+                rows.extend(result)
+                continue
 
-                if DATE_PATTERN.match(line):
-                    if current:
-                        current["description"] = " ".join(desc_buf).strip()
-                        txns.append(current)
+            # Try Format B
+            result = extract_format_b(table)
+            if result:
+                rows.extend(result)
 
-                    desc_buf = []
-                    m = AMOUNT_PATTERN.search(line)
-                    if not m:
-                        continue
+    df = pd.DataFrame(
+        rows,
+        columns=["date", "description", "debit", "credit", "balance"]
+    )
 
-                    amt = float(m.group(1).replace(",", ""))
-                    sign = m.group(2)
-                    bal = float(m.group(3).replace(",", ""))
+    # ===============================
+    # FAIL-SAFE (NO CRASH)
+    # ===============================
+    if df.empty:
+        return pd.DataFrame([{
+            "date": "",
+            "description": "No extractable Maybank transactions",
+            "debit": 0.0,
+            "credit": 0.0,
+            "balance": 0.0
+        }])
 
-                    current = {
-                        "date": line[:11],
-                        "description": "",
-                        "debit": amt if sign == "-" else 0.0,
-                        "credit": amt if sign == "+" else 0.0,
-                        "balance": bal
-                    }
-
-                    desc_buf.append(line[:m.start()].strip())
-                else:
-                    if current:
-                        desc_buf.append(line)
-
-        if current:
-            current["description"] = " ".join(desc_buf).strip()
-            txns.append(current)
-
-    return pd.DataFrame(txns)
-
-
-# =====================================================
-# 3️⃣ PUBLIC FUNCTION (USED BY app.py)
-# =====================================================
-
-def extract_maybank(pdf_path):
-    """
-    Streamlit-safe Maybank extractor.
-    Tries PyMuPDF first, falls back to pdfplumber.
-    Output columns are STRICTLY:
-    date | description | debit | credit | balance
-    """
-
-    try:
-        df = _extract_maybank_pymupdf(pdf_path)
-        if df is not None and not df.empty:
-            return df
-    except Exception:
-        pass
-
-    try:
-        df = _extract_maybank_pdfplumber(pdf_path)
-        if df is not None and not df.empty:
-            return df
-    except Exception:
-        pass
-
-    return pd.DataFrame(columns=["date", "description", "debit", "credit", "balance"])
+    return df
