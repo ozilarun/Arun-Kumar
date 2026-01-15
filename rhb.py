@@ -1,91 +1,104 @@
 import pdfplumber
 import pandas as pd
 import re
-from datetime import datetime
 
-# =====================================================
-# HELPERS
-# =====================================================
+# ==========================
+# REGEX (CORE RHB FORMAT)
+# ==========================
+TX_LINE_PATTERN = re.compile(
+    r"^\s*(\d{1,2})\s*([A-Za-z]{3})\s+(.*?)\s+([0-9,]+\.\d{2})\s+([0-9,]+\.\d{2})\s*$"
+)
 
-def parse_amount(val):
-    if val is None:
-        return 0.0
-    s = str(val).replace(",", "").strip()
-    try:
-        return float(s)
-    except:
-        return 0.0
+IGNORE_LINES = [
+    "RHB Bank",
+    "Page",
+    "Statement Period",
+    "Balance",
+    "Total Count",
+    "Member of PIDM",
+]
 
+CREDIT_KEYWORDS = [
+    "CR", "DEPOSIT", "INWARD", "HIBAH", "PROFIT", "DEP", "CHEQUE"
+]
 
-def clean_date(s):
-    s = s.strip()
-    for fmt in ("%d/%m/%Y", "%d-%m-%Y", "%d/%m/%y"):
-        try:
-            return datetime.strptime(s, fmt).strftime("%d %b %Y")
-        except:
-            pass
-    return s
-
-
-# =====================================================
-# MAIN RHB EXTRACTOR (TEXT-BASED ONLY)
-# =====================================================
-
+# ==========================
+# MAIN EXTRACTOR
+# ==========================
 def extract_rhb(pdf_path):
-    rows = []
+    transactions = []
+
+    # Detect year from filename (fallback to current year if missing)
+    year_match = re.search(r"(20\d{2})", pdf_path)
+    year = year_match.group(1) if year_match else "2024"
+
+    prev_balance = None
 
     with pdfplumber.open(pdf_path) as pdf:
         for page in pdf.pages:
-            table = page.extract_table()
-
-            if not table:
+            text = page.extract_text()
+            if not text:
                 continue
 
-            headers = [h.lower() if h else "" for h in table[0]]
-
-            # Expected RHB formats:
-            # date | description | debit | credit | balance
-            for row in table[1:]:
-                if not row or all(c in [None, ""] for c in row):
+            for line in text.splitlines():
+                line = line.strip()
+                if not line:
                     continue
 
-                try:
-                    date = row[0]
-                    desc = row[1]
-                    debit = row[2] if len(row) > 2 else 0
-                    credit = row[3] if len(row) > 3 else 0
-                    balance = row[4] if len(row) > 4 else None
+                # -------------------------
+                # TRANSACTION LINE
+                # -------------------------
+                m = TX_LINE_PATTERN.match(line)
+                if m:
+                    day, month, desc, amt_str, bal_str = m.groups()
 
-                    if not date or not re.search(r"\d", str(date)):
-                        continue
+                    amount = float(amt_str.replace(",", ""))
+                    balance = float(bal_str.replace(",", ""))
 
-                    rows.append({
-                        "date": clean_date(str(date)),
-                        "description": str(desc).replace("\n", " ").strip(),
-                        "debit": parse_amount(debit),
-                        "credit": parse_amount(credit),
-                        "balance": parse_amount(balance),
+                    debit = credit = 0.0
+
+                    # ----- Balance-diff logic -----
+                    if prev_balance is not None:
+                        if abs((prev_balance + amount) - balance) < 0.05:
+                            credit = amount
+                        elif abs((prev_balance - amount) - balance) < 0.05:
+                            debit = amount
+                        else:
+                            # Fallback keyword logic
+                            if any(k in desc.upper() for k in CREDIT_KEYWORDS):
+                                credit = amount
+                            else:
+                                debit = amount
+                    else:
+                        # First row fallback
+                        if any(k in desc.upper() for k in CREDIT_KEYWORDS):
+                            credit = amount
+                        else:
+                            debit = amount
+
+                    transactions.append({
+                        "date": f"{day} {month} {year}",
+                        "description": desc.strip(),
+                        "debit": debit,
+                        "credit": credit,
+                        "balance": balance
                     })
 
-                except:
+                    prev_balance = balance
                     continue
 
+                # -------------------------
+                # MULTI-LINE DESCRIPTION
+                # -------------------------
+                if transactions:
+                    if not any(k in line for k in IGNORE_LINES):
+                        if not re.match(r"^\s*\d{1,2}\s*[A-Za-z]{3}", line):
+                            transactions[-1]["description"] += " " + line.strip()
+
     df = pd.DataFrame(
-        rows,
+        transactions,
         columns=["date", "description", "debit", "credit", "balance"]
     )
 
-    # =================================================
-    # FALLBACK: NO TRANSACTIONS FOUND
-    # =================================================
-    if df.empty:
-        # Prevent Streamlit crash
-        return pd.DataFrame([{
-            "date": "",
-            "description": "No extractable text (OCR-based PDF not supported)",
-            "debit": 0.0,
-            "credit": 0.0,
-            "balance": 0.0
-        }])
-
+    print(f"✔ RHB extracted {len(df)} rows from {pdf_path}")
     return df
