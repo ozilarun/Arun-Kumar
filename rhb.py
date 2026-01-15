@@ -1,7 +1,8 @@
 # rhb.py
-# ==========================================================
-# RHB BANK STATEMENT EXTRACTOR (OCR-BASED – VERIFIED)
-# ==========================================================
+# ============================================================
+# RHB BANK STATEMENT EXTRACTOR
+# OCR-BASED | STREAMLIT-COMPATIBLE | VERIFIED
+# ============================================================
 
 import pdfplumber
 import pytesseract
@@ -12,9 +13,9 @@ import tempfile
 import os
 
 
-# ----------------------------------------------------------
-# NUMBER CLEANER
-# ----------------------------------------------------------
+# ------------------------------------------------------------
+# NUMBER PARSER
+# ------------------------------------------------------------
 def num(x):
     try:
         return float(str(x).replace(",", "").replace("+", "").replace("-", ""))
@@ -22,9 +23,9 @@ def num(x):
         return 0.0
 
 
-# ----------------------------------------------------------
-# OCR FALLBACK
-# ----------------------------------------------------------
+# ------------------------------------------------------------
+# EXTRACT TEXT (PDF → OCR FALLBACK)
+# ------------------------------------------------------------
 def extract_text(page, page_num):
     text = page.extract_text()
     if text and text.strip():
@@ -37,9 +38,9 @@ def extract_text(page, page_num):
         return ocr_text
 
 
-# ----------------------------------------------------------
-# PREPROCESS TEXT (MERGE MULTI-LINES)
-# ----------------------------------------------------------
+# ------------------------------------------------------------
+# PREPROCESS TEXT (MERGE MULTI-LINE TRANSACTIONS)
+# ------------------------------------------------------------
 def preprocess_rhb_text(text):
     lines = text.split("\n")
     merged = []
@@ -60,9 +61,9 @@ def preprocess_rhb_text(text):
     return "\n".join(merged)
 
 
-# ----------------------------------------------------------
-# TRANSACTION REGEX (THIS IS THE KEY)
-# ----------------------------------------------------------
+# ------------------------------------------------------------
+# TRANSACTION REGEX (MATCHES RHB FORMAT)
+# ------------------------------------------------------------
 TX_PATTERN = re.compile(
     r"""
     (?P<date>\d{2}-\d{2}-\d{4})      # Date
@@ -79,51 +80,55 @@ TX_PATTERN = re.compile(
 )
 
 
-# ----------------------------------------------------------
-# MAIN EXTRACTOR (USED BY app.py)
-# ----------------------------------------------------------
+# ------------------------------------------------------------
+# MAIN EXTRACTOR (CALLED BY app.py)
+# ------------------------------------------------------------
 def extract_rhb(pdf_path):
 
-    all_txns = []
+    transactions = []
 
     with pdfplumber.open(pdf_path) as pdf:
         for page_num, page in enumerate(pdf.pages, start=1):
 
-            raw_text = extract_text(page, page_num)
-            if not raw_text:
+            raw = extract_text(page, page_num)
+            if not raw:
                 continue
 
-            processed = preprocess_rhb_text(raw_text)
+            processed = preprocess_rhb_text(raw)
 
             for m in TX_PATTERN.finditer(processed):
 
-                date = m.group("date")
+                raw_date = m.group("date")
                 desc = m.group("body").strip()
 
                 debit = num(m.group("dr"))
                 credit = num(m.group("cr"))
                 balance = num(m.group("bal"))
 
-                all_txns.append({
-                    "date": date,
+                # 🔑 NORMALIZE DATE FORMAT FOR app.py
+                dt = pd.to_datetime(raw_date, format="%d-%m-%Y", errors="coerce")
+                date_str = dt.strftime("%d %b %Y") if not pd.isna(dt) else raw_date
+
+                transactions.append({
+                    "date": date_str,          # <-- CRITICAL FIX
                     "description": desc,
-                    "debit": debit,
-                    "credit": credit,
-                    "balance": balance
+                    "debit": round(debit, 2),
+                    "credit": round(credit, 2),
+                    "balance": round(balance, 2)
                 })
 
-    # ------------------------------------------------------
-    # SAFETY RETURN
-    # ------------------------------------------------------
-    if not all_txns:
+    # --------------------------------------------------------
+    # SAFETY RETURN (PREVENTS STREAMLIT CRASH)
+    # --------------------------------------------------------
+    if not transactions:
         return pd.DataFrame(
             columns=["date", "description", "debit", "credit", "balance"]
         )
 
-    df = pd.DataFrame(all_txns)
+    df = pd.DataFrame(transactions)
 
-    # Convert date
-    df["_dt"] = pd.to_datetime(df["date"], format="%d-%m-%Y", errors="coerce")
+    # Final sort
+    df["_dt"] = pd.to_datetime(df["date"], format="%d %b %Y", errors="coerce")
     df = df.sort_values("_dt").drop(columns="_dt").reset_index(drop=True)
 
     return df
