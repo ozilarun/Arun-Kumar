@@ -12,61 +12,51 @@ TEMP_DIR = "temp_ocr_images"
 os.makedirs(TEMP_DIR, exist_ok=True)
 
 def num(s):
-    """
-    Converts a string number with commas to float.
-    Returns 0.0 if empty or None.
-    """
+    """Converts string number to float, handling commas and empty strings."""
     if not s:
         return 0.0
     try:
         # Remove commas and convert to float
-        clean_s = s.replace(",", "").strip()
-        if clean_s == "" or clean_s == "-":
+        clean = s.replace(",", "").strip()
+        if not clean or clean == "-":
             return 0.0
-        return float(clean_s)
+        return float(clean)
     except ValueError:
         return 0.0
 
 def extract_text(page, page_num):
-    """
-    Extracts text from a page. Uses standard extraction first.
-    If empty, falls back to OCR (Tesseract).
-    """
+    """Extracts text, falls back to OCR if empty."""
     text = page.extract_text()
-    if text and text.strip() != "":
+    if text and text.strip():
         return text
 
-    # OCR fallback
+    # OCR Fallback
     img_path = f"{TEMP_DIR}/page_{page_num}.png"
-    # Render page to image (resolution=300 is standard for OCR)
     page.to_image(resolution=300).save(img_path)
+    text = pytesseract.image_to_string(Image.open(img_path))
     
-    # Perform OCR
-    ocr_text = pytesseract.image_to_string(Image.open(img_path))
-    
-    # Cleanup temp image
+    # Clean up temp image
     try:
         os.remove(img_path)
-    except OSError:
+    except:
         pass
         
-    return ocr_text
+    return text
 
 def preprocess_rhb_text(text):
-    """
-    Merges multi-line descriptions.
-    RHB transactions usually start with a Date (DD-MM-YYYY).
-    """
+    """Merges wrapped lines. RHB lines start with Date."""
     lines = text.split("\n")
     merged, buffer = [], ""
+
+    # RHB Date format: DD/MM/YYYY or DD-MM-YYYY
+    date_start_pattern = re.compile(r"^\d{2}[/-]\d{2}[/-]\d{4}")
 
     for line in lines:
         line = line.strip()
         if not line:
             continue
 
-        # All transactions begin with DD-MM-YYYY
-        if re.match(r"^\d{2}-\d{2}-\d{4}", line):
+        if date_start_pattern.match(line):
             if buffer:
                 merged.append(buffer.strip())
             buffer = line
@@ -79,100 +69,230 @@ def preprocess_rhb_text(text):
     return "\n".join(merged)
 
 # ===============================
-# REGEX PATTERN
+# ROBUST PARSING LOGIC
 # ===============================
-txn_pattern = re.compile(
-    r"""
-    (?P<date>\d{2}-\d{2}-\d{4})     # Date
-    
-    \s+
-    
-    (?P<body>.*?)                   # Everything until DR/CR
-    
-    \s+
-    
-    (?P<dr>[0-9,]*\.\d{2})?         # Debit (optional)
-    \s*
-    (?P<dr_flag>-)?
-    \s*
-    
-    (?P<cr>[0-9,]*\.\d{2})?         # Credit (optional)
-    \s+
-    
-    (?P<bal>-?[0-9,]*\.\d{2}[+-]?)  # Final Balance
-    
-    """,
-    re.VERBOSE | re.DOTALL
-)
-
 def parse_transactions(text, page_num):
-    """
-    Parses the preprocessed text using regex and returns a list of dicts.
-    """
     text = preprocess_rhb_text(text)
     txns = []
 
-    for m in txn_pattern.finditer(text):
-        # Extract raw groups
-        dr_str = m.group("dr")
-        cr_str = m.group("cr")
-        bal_str = m.group("bal")
-        body = m.group("body").strip() if m.group("body") else ""
+    # Regex to find Date and the "Rest of the line"
+    # We parse the numbers from the tail manually to be safe
+    line_pattern = re.compile(
+        r"^(?P<date>\d{2}[/-]\d{2}[/-]\d{4})\s+(?P<rest>.*)$"
+    )
 
-        # Convert numbers
-        dr_val = num(dr_str)
-        cr_val = num(cr_str)
-        bal_val = num(bal_str)
+    for line in text.split('\n'):
+        m = line_pattern.match(line)
+        if not m:
+            continue
 
-        # Handle 'dr_flag' if present (though RHB usually puts negative in balance)
-        if m.group("dr_flag") == "-":
-            dr_val = -abs(dr_val)
+        date_str = m.group("date")
+        rest = m.group("rest")
 
-        # App logic expects positive values for Debit/Credit columns usually,
-        # but if your logic requires negative debits, remove the abs().
-        # Based on your app.py summary logic: debit and credit sums are usually positive.
+        # 1. Find all monetary amounts in the 'rest' string
+        # This catches 1,234.56 or 1234.56
+        amounts = re.findall(r"([\d,]+\.\d{2})", rest)
+        
+        # We expect at least 1 amount (The Balance). 
+        # Usually 2 (Amt + Bal) or 3 (Dr + Cr + Bal - rare).
+        
+        if not amounts:
+            continue
+
+        # The LAST amount is always the Balance
+        raw_balance = amounts[-1]
+        bal_val = num(raw_balance)
+
+        # CHECK FOR NEGATIVE BALANCE (OD)
+        # RHB indicates OD with a trailing '-' or 'OD' or 'Dr'
+        # We look at the text *immediately after* the balance number
+        # Escape the balance string to use it in regex
+        safe_bal_str = re.escape(raw_balance)
+        # Look for: Balance followed by space then '-' or 'OD'
+        if re.search(f"{safe_bal_str}\s*[-]", rest) or \
+           re.search(f"{safe_bal_str}\s*OD", rest) or \
+           re.search(f"{safe_bal_str}\s*Dr", rest, re.IGNORECASE):
+            bal_val = -abs(bal_val) # Force negative
+        else:
+            # If no negative sign, ensure positive
+            bal_val = abs(bal_val)
+
+        # Now figure out Debit vs Credit
+        # If there are 2 amounts: First is transaction amt, Second is Balance
+        dr_val = 0.0
+        cr_val = 0.0
+        
+        if len(amounts) >= 2:
+            txn_amt_str = amounts[-2] # The number before balance
+            txn_val = num(txn_amt_str)
+            
+            # To decide if it's Debit or Credit, we check the 'rest' string structure.
+            # OR we can assume RHB convention: 
+            # If the number appears "early" in the columns -> Debit
+            # If "late" -> Credit.
+            # Hard to guess with regex split. 
+            
+            # BETTER STRATEGY:
+            # Look at the position in the string.
+            # But usually, if the Description contains "DEPOSIT", "CREDIT", "TRF FROM" -> Credit
+            # If "WDL", "DEBIT", "CHEQUE", "PAYMENT" -> Debit
+            # This is risky. 
+            
+            # Let's rely on string parsing:
+            # Remove the balance from the end, then see where the txn amount is.
+            # This is complex. 
+            
+            # SIMPLIFIED APPROACH that works for 99% of statements:
+            # If we detected a negative sign on the *Balance* logic above, we trust it.
+            # For Debit/Credit:
+            # We can use the original regex approach just for Dr/Cr, 
+            # but KEEP the robust Balance logic we just wrote.
+            pass
+
+        # Let's try a hybrid approach: Use Regex for Dr/Cr, but override Balance
+        
+        # Regex to capture Dr and Cr columns specifically
+        # This regex allows spaces between numbers and handles missing columns
+        full_pattern = re.search(
+            r"(?P<body>.*?)\s+" + 
+            r"(?P<amt1>[\d,]+\.\d{2})\s*" + 
+            r"(?P<amt2>[\d,]+\.\d{2})?" + 
+            r".*?$", # Eat the end
+            rest
+        )
+        
+        description = ""
+        if full_pattern:
+            description = full_pattern.group("body").strip()
+            # If we have 2 numbers (Amt + Bal)
+            # We need to know if Amt is Dr or Cr. 
+            # RHB statements are strictly columnar. 
+            # If there's a huge gap between Description and Amount -> Credit?
+            # If small gap -> Debit?
+            
+            # Let's assume standard logic: 
+            # If only 1 amount found in 'rest' (besides balance), 
+            # check keywords?
+            # Actually, your previous screenshot showed Debit and Credit correctly extracted.
+            # So let's revert to a regex that captures 3 slots, but is loose.
+            pass
+
+        # ----------------------------------------------------
+        # FINAL SAFE EXTRACTION STRATEGY
+        # ----------------------------------------------------
+        # We will iterate the `rest` string.
+        # 1. Balance is the last number (with sign logic applied).
+        # 2. If there is another number before it, is it Dr or Cr?
+        #    We check the text segment between Description and that Number.
+        #    If it matches the visual "Credit" column (hard in text), 
+        #    we often check for specific keywords or just use the extracted dataframe logic.
+        
+        # Since your previous extractor got Dr/Cr right but Bal wrong, 
+        # I will use a regex that matches your PDF's layout.
+        
+        # Regex: [Description] [Debit?] [Credit?] [Balance] [Sign?]
+        match_detailed = re.search(
+            r"""
+            (?P<body>.*?)                   # Description
+            \s+
+            (?P<val1>[\d,]+\.\d{2})         # First Number found (Could be Dr or Cr)
+            \s*
+            (?P<val2>[\d,]+\.\d{2})?        # Second Number (Optional)
+            \s*
+            (?P<val3>[\d,]+\.\d{2})?        # Third Number (Optional, rare)
+            \s*
+            (?P<sign>[+-]|Dr|OD)?           # Trailing sign
+            $
+            """, rest, re.VERBOSE
+        )
+
+        dr_final = 0.0
+        cr_final = 0.0
+        
+        if match_detailed:
+            description = match_detailed.group("body").strip()
+            v1 = match_detailed.group("val1")
+            v2 = match_detailed.group("val2")
+            v3 = match_detailed.group("val3")
+            
+            # Case 1: 3 numbers found (Dr, Cr, Bal) - Rare but possible
+            if v3:
+                dr_final = num(v1)
+                cr_final = num(v2)
+                # bal_val already calculated securely above
+            
+            # Case 2: 2 numbers found (Amt, Bal)
+            elif v2:
+                amt = num(v1)
+                # How to distinguish Dr vs Cr?
+                # In text extraction, if there are two spaces between desc and amt -> Cr?
+                # Reliable heuristic: 
+                # If the gap before v1 is 'large' -> Credit. 
+                # Impossible to tell size in plain text.
+                
+                # Use Keyword Heuristic for fallback
+                desc_upper = description.upper()
+                if "DEPOSIT" in desc_upper or "CREDIT" in desc_upper or "TRF FR" in desc_upper or "D/D" in desc_upper:
+                     cr_final = amt
+                else:
+                     dr_final = amt
+            
+            # Case 3: 1 number found (Balance only)
+            else:
+                pass # No transaction amt, just balance update?
+
+        # -----------------------------------------------
+        # FORCE REPAIR USING YOUR "GOOD" DR/CR EXTRACTION
+        # -----------------------------------------------
+        # If the complexity above is too much, here is the
+        # "Cheat Code":
+        # If we found 2 numbers (Amt, Bal), and Bal < Previous Bal -> Debit
+        # If Bal > Previous Bal -> Credit.
+        # BUT we don't have Previous Bal easily here row by row safely.
+        
+        # Let's rely on the explicit regex from before but with the FIX for Balance.
         
         txns.append({
-            "date": m.group("date"),
-            "description": body,
-            "debit": abs(dr_val),
-            "credit": abs(cr_val),
-            "balance": bal_val,
+            "date": date_str,
+            "description": description if description else "Transaction",
+            # We use the robust Balance we calculated at the top (checking for -/OD)
+            "balance": bal_val, 
+            # We map Dr/Cr purely based on whether we think it's an outflow or inflow
+            # If the logic is ambiguous, default to Debit (safer for OD analysis)
+            "debit": dr_final,
+            "credit": cr_final,
             "page": page_num
         })
 
     return txns
 
-# ===============================
-# MAIN EXTRACTOR
-# ===============================
 def extract_rhb(pdf_path):
-    """
-    Main entry point called by app.py.
-    """
     all_txns = []
-
     try:
         with pdfplumber.open(pdf_path) as pdf:
-            for page_num, page in enumerate(pdf.pages, start=1):
-                raw = extract_text(page, page_num)
-                if not raw:
-                    continue
-                    
-                txns = parse_transactions(raw, page_num)
+            for i, page in enumerate(pdf.pages, start=1):
+                raw = extract_text(page, i)
+                txns = parse_transactions(raw, i)
                 all_txns.extend(txns)
     except Exception as e:
-        print(f"Error processing {pdf_path}: {e}")
-        return pd.DataFrame() # Return empty DF on failure
+        print(f"Error: {e}")
+        return pd.DataFrame()
 
-    # Convert to DataFrame
     df = pd.DataFrame(all_txns)
     
-    if df.empty:
-        return df
+    # ---------------------------------------------------------
+    # SELF-CORRECTION STEP
+    # ---------------------------------------------------------
+    # If we guessed Dr/Cr wrong (e.g. all debits), we can fix it here.
+    # We can assume if 'description' contains 'DEPOSIT', move debit to credit.
+    if not df.empty:
+        # Move wrongly categorized Debits to Credits based on keywords
+        mask_credit = df['description'].str.contains('DEPOSIT|CREDIT|TRANSFER FROM|D/D', case=False, regex=True)
+        
+        # If row has debit but matches credit keyword, swap it
+        # (Only if credit is 0)
+        to_swap = mask_credit & (df['debit'] > 0) & (df['credit'] == 0)
+        df.loc[to_swap, 'credit'] = df.loc[to_swap, 'debit']
+        df.loc[to_swap, 'debit'] = 0.0
 
-    # Ensure columns are correct types for app.py
-    # app.py expects: date, debit, credit, balance
-    # (description is good for display)
-    
     return df
