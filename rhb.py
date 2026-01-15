@@ -2,16 +2,6 @@ import pdfplumber
 import pandas as pd
 import re
 
-def ocr_available():
-    try:
-        from pdf2image import convert_from_path
-        import pytesseract
-        from PIL import Image
-        return True
-    except:
-        return False
-
-
 # ==========================
 # REGEX
 # ==========================
@@ -32,6 +22,18 @@ IGNORE_LINES = [
     "TOTAL",
     "MEMBER OF PIDM",
 ]
+
+# ==========================
+# OCR AVAILABILITY CHECK
+# ==========================
+def ocr_available():
+    try:
+        import pytesseract
+        from pdf2image import convert_from_path
+        from PIL import Image
+        return True
+    except:
+        return False
 
 # ==========================
 # CORE LINE PARSER
@@ -97,40 +99,28 @@ def extract_rhb(pdf_path):
     y = re.search(r"(20\d{2})", pdf_path)
     year = y.group(1) if y else "2024"
 
-    # ======================
-    # PASS 1 — TEXT PDF
-    # ======================
+    # -------- PASS 1: TEXT --------
     with pdfplumber.open(pdf_path) as pdf:
         for page in pdf.pages:
             text = page.extract_text()
             if not text:
                 continue
 
-            lines = text.splitlines()
-            rows = parse_lines(lines, year)
-
+            rows = parse_lines(text.splitlines(), year)
             if rows:
                 transactions.extend(rows)
 
-    # ======================
-    # PASS 2 — OCR FALLBACK
-    # ======================
-    if not transactions:
+    # -------- PASS 2: OCR (SAFE) --------
+    if not transactions and ocr_available():
         try:
-           if ocr_available():
-    from pdf2image import convert_from_path
-    import pytesseract
+            from pdf2image import convert_from_path
+            import pytesseract
 
-    images = convert_from_path(pdf_path, dpi=300)
-
+            images = convert_from_path(pdf_path, dpi=300)
 
             for img in images:
-                gray = img.convert("L")
-                text = pytesseract.image_to_string(gray, config="--psm 6")
-
-                lines = text.splitlines()
-                rows = parse_lines(lines, year)
-
+                text = pytesseract.image_to_string(img, config="--psm 6")
+                rows = parse_lines(text.splitlines(), year)
                 if rows:
                     transactions.extend(rows)
 
