@@ -206,7 +206,15 @@ for month, df in months:
         if ending < 0 and OD_LIMIT > 0 else 0
     })
 
-summary_df = pd.DataFrame(rows)
+summary_df = pd.DataFrame(
+    rows,
+    columns=[
+        "Month", "Opening", "Debit", "Credit",
+        "Ending", "Highest", "Lowest",
+        "Swing", "OD Util (RM)", "OD %"
+    ]
+)
+
 
 st.subheader("📅 Summary Table")
 st.dataframe(summary_df, use_container_width=True)
