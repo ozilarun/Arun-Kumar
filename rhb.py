@@ -1,121 +1,155 @@
 import pdfplumber
+import pytesseract
+from PIL import Image
+import regex as re
 import pandas as pd
-import re
+import os
+import tempfile
 
-# ===============================
-# CONFIG: COLUMN POSITIONS
-# ===============================
-# RHB Statement layouts are usually consistent. 
-# We define "X-Axis" (horizontal) boundaries for the columns.
-# Units are in PDF "points" (0 = Left edge, 595 = Right edge for A4)
-
-LIMITS = {
-    "debit_min": 320,
-    "debit_max": 435,   # Numbers in this zone are DEBITS
-    "credit_min": 436,
-    "credit_max": 525,  # Numbers in this zone are CREDITS
-    "bal_min": 526      # Numbers past this are BALANCE
-}
+# Temporary directory for OCR images
+TEMP_DIR = tempfile.gettempdir()
 
 def num(s):
-    """Clean number string to float"""
-    if not s: return 0.0
+    """Convert string to float, handling commas and signs."""
+    if not s or s == "":
+        return 0.0
+    s = str(s).strip()
+    # Remove trailing +/- signs
+    s = re.sub(r'[+-]$', '', s)
+    # Remove commas
+    s = s.replace(',', '')
+    # Handle negative sign
+    if s.startswith('-'):
+        return -float(s[1:])
     try:
-        clean = s.replace(",", "").strip()
-        if clean == "-" or not clean:
-            return 0.0
-        return float(clean)
+        return float(s)
     except:
         return 0.0
 
-def extract_rhb(pdf_path):
-    all_txns = []
+def extract_text(page, page_num):
+    """Extract text from page, with OCR fallback."""
+    text = page.extract_text()
+    if text and text.strip() != "":
+        return text
+    
+    # OCR fallback
+    img_path = os.path.join(TEMP_DIR, f"rhb_page_{page_num}.png")
+    try:
+        page.to_image(resolution=300).save(img_path)
+        ocr_text = pytesseract.image_to_string(Image.open(img_path))
+        # Clean up temp file
+        if os.path.exists(img_path):
+            os.remove(img_path)
+        return ocr_text
+    except Exception as e:
+        print(f"OCR failed for page {page_num}: {e}")
+        return ""
 
+def preprocess_rhb_text(text):
+    """Merge broken lines that belong to the same transaction."""
+    lines = text.split("\n")
+    merged = []
+    buffer = ""
+    
+    for line in lines:
+        line = line.strip()
+        # All transactions begin with DD-MM-YYYY
+        if re.match(r"^\d{2}-\d{2}-\d{4}", line):
+            if buffer:
+                merged.append(buffer.strip())
+            buffer = line
+        else:
+            buffer += " " + line
+    
+    if buffer:
+        merged.append(buffer.strip())
+    
+    return "\n".join(merged)
+
+# Transaction pattern for RHB statements
+txn_pattern = re.compile(
+    r"""
+    (?P<date>\d{2}-\d{2}-\d{4})     # Date
+    
+    \s+
+    
+    (?P<body>.*?)                   # Everything until DR/CR
+    
+    \s+
+    
+    (?P<dr>[0-9,]*\.\d{2})?         # Debit (optional)
+    \s*
+    (?P<dr_flag>-)?
+    \s*
+    
+    (?P<cr>[0-9,]*\.\d{2})?         # Credit (optional)
+    \s+
+    
+    (?P<bal>-?[0-9,]*\.\d{2}[+-]?)  # Final Balance
+    
+    """,
+    re.VERBOSE | re.DOTALL
+)
+
+def parse_transactions(text, page_num):
+    """Parse transactions from preprocessed text."""
+    text = preprocess_rhb_text(text)
+    txns = []
+    
+    for m in txn_pattern.finditer(text):
+        # Safe extraction
+        body = m.group("body").strip() if m.group("body") else ""
+        dr = m.group("dr")
+        cr = m.group("cr")
+        bal = m.group("bal")
+        
+        dr_val = num(dr) if dr else 0.0
+        cr_val = num(cr) if cr else 0.0
+        bal_val = num(bal) if bal else 0.0
+        
+        txns.append({
+            "date": m.group("date"),
+            "description": body,
+            "debit": dr_val if dr_val > 0 else 0.0,
+            "credit": cr_val if cr_val > 0 else 0.0,
+            "balance": bal_val,
+            "page": page_num
+        })
+    
+    return txns
+
+def extract_rhb(pdf_path):
+    """
+    Main extraction function for RHB bank statements.
+    Returns a pandas DataFrame with columns: date, description, debit, credit, balance.
+    """
+    all_txns = []
+    
     try:
         with pdfplumber.open(pdf_path) as pdf:
-            for page in pdf.pages:
-                # 1. Extract words with their X/Y coordinates
-                words = page.extract_words(keep_blank_chars=True)
-                
-                # 2. Group words into "Rows" based on their Y-position (top)
-                # We allow a small tolerance (3 pixels) to group words on the same line
-                rows = {}
-                for w in words:
-                    # Round 'top' to nearest 3 pixels to handle slight misalignments
-                    y_approx = round(w['top'] / 3) * 3
-                    if y_approx not in rows:
-                        rows[y_approx] = []
-                    rows[y_approx].append(w)
-
-                # 3. Sort rows from top to bottom
-                sorted_y = sorted(rows.keys())
-
-                # 4. Process each row
-                for y in sorted_y:
-                    row_words = rows[y]
-                    
-                    # Sort words left-to-right
-                    row_words.sort(key=lambda x: x['x0'])
-                    
-                    # Reconstruct the full text line for Date/Description
-                    full_text = " ".join([w['text'] for w in row_words])
-                    
-                    # Check if this row starts with a Date (DD/MM)
-                    # RHB format: 01/02/2025 or 01-02-2025
-                    date_match = re.search(r"^\d{2}[/-]\d{2}", full_text)
-                    if not date_match:
-                        continue # Skip header/footer lines
-
-                    # Initialize row data
-                    date_str = row_words[0]['text'] # First word is date
-                    debit = 0.0
-                    credit = 0.0
-                    balance = 0.0
-                    
-                    # Build Description: Join words that are largely on the LEFT side (x < 320)
-                    desc_words = [w['text'] for w in row_words if w['x0'] < LIMITS["debit_min"] and w['text'] != date_str]
-                    description = " ".join(desc_words)
-
-                    # FIND NUMBERS IN COLUMNS
-                    # We look at the words on the right side
-                    for w in row_words:
-                        text_val = w['text']
-                        x_pos = w['x0']
-                        
-                        # Check if it looks like a number (has digits and dot)
-                        if not re.match(r"[\d,]+\.\d{2}", text_val):
-                            continue
-
-                        val = num(text_val)
-
-                        # Assign to column based on X-Position
-                        if LIMITS["debit_min"] <= x_pos <= LIMITS["debit_max"]:
-                            debit = val
-                        elif LIMITS["credit_min"] <= x_pos <= LIMITS["credit_max"]:
-                            credit = val
-                        elif x_pos > LIMITS["bal_min"]:
-                            balance = val
-                            
-                            # Handle Negative Balance indicators
-                            # Sometimes the "-" or "OD" is a separate word next to the balance
-                            # We check the next word in the list if it exists
-                            idx = row_words.index(w)
-                            if idx + 1 < len(row_words):
-                                next_word = row_words[idx+1]['text']
-                                if next_word in ["-", "OD", "Dr"]:
-                                    balance = -abs(balance)
-
-                    # Store Transaction
-                    all_txns.append({
-                        "date": date_str,
-                        "description": description,
-                        "debit": debit,
-                        "credit": credit,
-                        "balance": balance
-                    })
-
+            for page_num, page in enumerate(pdf.pages, start=1):
+                raw = extract_text(page, page_num)
+                processed = preprocess_rhb_text(raw)
+                txns = parse_transactions(processed, page_num)
+                all_txns.extend(txns)
+        
+        if not all_txns:
+            print(f"Warning: No transactions found in {pdf_path}")
+            return pd.DataFrame(columns=["date", "description", "debit", "credit", "balance"])
+        
+        # Convert to DataFrame
+        df = pd.DataFrame(all_txns)
+        
+        # Drop the 'page' column if present (not needed in final output)
+        if 'page' in df.columns:
+            df = df.drop(columns=['page'])
+        
+        # Ensure correct column order
+        df = df[["date", "description", "debit", "credit", "balance"]]
+        
+        print(f"RHB extraction complete: {len(df)} transactions")
+        return df
+    
     except Exception as e:
-        print(f"Extraction Error: {e}")
-        return pd.DataFrame()
-
-    return pd.DataFrame(all_txns)
+        print(f"Error extracting RHB statement from {pdf_path}: {e}")
+        return pd.DataFrame(columns=["date", "description", "debit", "credit", "balance"])
