@@ -1,136 +1,138 @@
+# rhb.py
+# ---------------------------------------
+# RHB Bank Statement Extractor (Streamlit)
+# ---------------------------------------
+
 import pdfplumber
+import pytesseract
+from PIL import Image
 import pandas as pd
-import re
+import regex as re
+import tempfile
+import os
 
-# ==========================
-# REGEX
-# ==========================
-TX_PATTERN = re.compile(
-    r"^\s*(\d{1,2})\s*([A-Za-z]{3})\s+(.*?)\s+([0-9,]+\.\d{2})\s+([0-9,]+\.\d{2})\s*$"
-)
+# -----------------------------
+# OCR helper
+# -----------------------------
+def extract_text(page, page_num):
+    text = page.extract_text()
+    if text and text.strip():
+        return text
 
-CREDIT_HINTS = [
-    "CR", "CREDIT", "DEPOSIT", "INWARD",
-    "PROFIT", "HIBAH", "GIRO", "CHEQUE"
-]
+    # OCR fallback
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as img_file:
+        page.to_image(resolution=300).save(img_file.name)
+        ocr_text = pytesseract.image_to_string(Image.open(img_file.name))
+        os.unlink(img_file.name)
+        return ocr_text
 
-IGNORE_LINES = [
-    "RHB BANK",
-    "PAGE",
-    "STATEMENT",
-    "BALANCE",
-    "TOTAL",
-    "MEMBER OF PIDM",
-]
 
-# ==========================
-# OCR AVAILABILITY CHECK
-# ==========================
-def ocr_available():
-    try:
-        import pytesseract
-        from pdf2image import convert_from_path
-        from PIL import Image
-        return True
-    except:
-        return False
-
-# ==========================
-# CORE LINE PARSER
-# ==========================
-def parse_lines(lines, year):
-    rows = []
-    prev_balance = None
+# -----------------------------
+# Preprocess text
+# -----------------------------
+def preprocess_text(text):
+    lines = text.split("\n")
+    merged = []
+    buffer = ""
 
     for line in lines:
         line = line.strip()
-        if not line:
-            continue
-
-        if any(x in line.upper() for x in IGNORE_LINES):
-            continue
-
-        m = TX_PATTERN.match(line)
-        if not m:
-            continue
-
-        day, mon, desc, amt_str, bal_str = m.groups()
-
-        amount = float(amt_str.replace(",", ""))
-        balance = float(bal_str.replace(",", ""))
-
-        debit = credit = 0.0
-
-        if prev_balance is not None:
-            if abs(prev_balance + amount - balance) < 0.05:
-                credit = amount
-            elif abs(prev_balance - amount - balance) < 0.05:
-                debit = amount
-            else:
-                if any(k in desc.upper() for k in CREDIT_HINTS):
-                    credit = amount
-                else:
-                    debit = amount
+        if re.match(r"^\d{1,2}\s+[A-Za-z]{3}", line):
+            if buffer:
+                merged.append(buffer.strip())
+            buffer = line
         else:
-            if any(k in desc.upper() for k in CREDIT_HINTS):
-                credit = amount
-            else:
-                debit = amount
+            buffer += " " + line
 
-        rows.append({
-            "date": f"{day} {mon} {year}",
-            "description": desc.strip(),
-            "debit": debit,
-            "credit": credit,
-            "balance": balance,
-        })
+    if buffer:
+        merged.append(buffer.strip())
 
-        prev_balance = balance
+    return merged
 
-    return rows
 
-# ==========================
-# MAIN EXTRACTOR
-# ==========================
+# -----------------------------
+# Transaction regex
+# -----------------------------
+TX_PATTERN = re.compile(
+    r"""
+    ^\s*
+    (?P<day>\d{1,2})\s+
+    (?P<month>[A-Za-z]{3})\s+
+    (?P<desc>.*?)
+    \s+
+    (?P<amount>[0-9,]+\.\d{2})
+    \s+
+    (?P<balance>-?[0-9,]+\.\d{2})
+    \s*$
+    """,
+    re.VERBOSE
+)
+
+
+# -----------------------------
+# Main extractor
+# -----------------------------
 def extract_rhb(pdf_path):
     transactions = []
+    prev_balance = None
 
-    # Detect year from filename
-    y = re.search(r"(20\d{2})", pdf_path)
-    year = y.group(1) if y else "2024"
+    year_match = re.search(r"(20\d{2})", pdf_path)
+    year = year_match.group(1) if year_match else "2025"
 
-    # -------- PASS 1: TEXT --------
     with pdfplumber.open(pdf_path) as pdf:
-        for page in pdf.pages:
-            text = page.extract_text()
-            if not text:
+        for page_num, page in enumerate(pdf.pages, start=1):
+            raw_text = extract_text(page, page_num)
+            if not raw_text:
                 continue
 
-            rows = parse_lines(text.splitlines(), year)
-            if rows:
-                transactions.extend(rows)
+            lines = preprocess_text(raw_text)
 
-    # -------- PASS 2: OCR (SAFE) --------
-    if not transactions and ocr_available():
-        try:
-            from pdf2image import convert_from_path
-            import pytesseract
+            for line in lines:
+                m = TX_PATTERN.match(line)
+                if not m:
+                    continue
 
-            images = convert_from_path(pdf_path, dpi=300)
+                day = m.group("day")
+                month = m.group("month")
+                desc = m.group("desc").strip()
+                amount = float(m.group("amount").replace(",", ""))
+                balance = float(m.group("balance").replace(",", ""))
 
-            for img in images:
-                text = pytesseract.image_to_string(img, config="--psm 6")
-                rows = parse_lines(text.splitlines(), year)
-                if rows:
-                    transactions.extend(rows)
+                # Determine debit / credit
+                debit = 0.0
+                credit = 0.0
 
-        except Exception as e:
-            print("⚠ RHB OCR failed:", e)
+                if prev_balance is not None:
+                    if abs(prev_balance + amount - balance) < 0.05:
+                        credit = amount
+                    elif abs(prev_balance - amount - balance) < 0.05:
+                        debit = amount
+                    else:
+                        # fallback keyword logic
+                        if any(k in desc.upper() for k in ["CR", "DEPOSIT", "INWARD", "PROFIT", "HIBAH"]):
+                            credit = amount
+                        else:
+                            debit = amount
+                else:
+                    debit = amount  # first row fallback
 
-    df = pd.DataFrame(
-        transactions,
-        columns=["date", "description", "debit", "credit", "balance"]
-    )
+                transactions.append({
+                    "date": f"{day} {month} {year}",
+                    "description": desc,
+                    "debit": round(debit, 2),
+                    "credit": round(credit, 2),
+                    "balance": round(balance, 2),
+                })
 
-    print(f"✔ RHB extracted {len(df)} rows from {pdf_path}")
+                prev_balance = balance
+
+    if not transactions:
+        return pd.DataFrame(columns=["date", "description", "debit", "credit", "balance"])
+
+    df = pd.DataFrame(transactions)
+
+    # Sort safely
+    df["_dt"] = pd.to_datetime(df["date"], format="%d %b %Y", errors="coerce")
+    df = df.sort_values("_dt").drop(columns="_dt").reset_index(drop=True)
+
     return df
