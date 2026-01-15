@@ -14,15 +14,22 @@ def num(s):
     if not s or s == "":
         return 0.0
     s = str(s).strip()
-    # Remove trailing +/- signs
-    s = re.sub(r'[+-]$', '', s)
+    
+    # Check for negative indicator (- sign or trailing -)
+    is_negative = False
+    if s.startswith('-') or s.endswith('-'):
+        is_negative = True
+        s = s.replace('-', '')
+    
     # Remove commas
     s = s.replace(',', '')
-    # Handle negative sign
-    if s.startswith('-'):
-        return -float(s[1:])
+    
+    # Remove trailing +/- signs that might remain
+    s = re.sub(r'[+-]$', '', s)
+    
     try:
-        return float(s)
+        value = float(s)
+        return -value if is_negative else value
     except:
         return 0.0
 
@@ -66,7 +73,7 @@ def preprocess_rhb_text(text):
     
     return "\n".join(merged)
 
-# Transaction pattern for RHB statements
+# Transaction pattern for RHB statements - UPDATED to capture negative signs better
 txn_pattern = re.compile(
     r"""
     (?P<date>\d{2}-\d{2}-\d{4})     # Date
@@ -77,15 +84,13 @@ txn_pattern = re.compile(
     
     \s+
     
-    (?P<dr>[0-9,]*\.\d{2})?         # Debit (optional)
-    \s*
-    (?P<dr_flag>-)?
+    (?P<dr>-?[0-9,]*\.\d{2})?       # Debit (optional, may have leading -)
     \s*
     
-    (?P<cr>[0-9,]*\.\d{2})?         # Credit (optional)
+    (?P<cr>-?[0-9,]*\.\d{2})?       # Credit (optional, may have leading -)
     \s+
     
-    (?P<bal>-?[0-9,]*\.\d{2}[+-]?)  # Final Balance
+    (?P<bal>-?[0-9,]+\.\d{2}[-+]?)  # Balance (may have leading - or trailing -/+)
     
     """,
     re.VERBOSE | re.DOTALL
@@ -103,9 +108,15 @@ def parse_transactions(text, page_num):
         cr = m.group("cr")
         bal = m.group("bal")
         
+        # Parse with proper negative handling
         dr_val = num(dr) if dr else 0.0
         cr_val = num(cr) if cr else 0.0
         bal_val = num(bal) if bal else 0.0
+        
+        # Debit and Credit should always be positive (absolute values)
+        dr_val = abs(dr_val)
+        cr_val = abs(cr_val)
+        # Balance can be negative or positive
         
         txns.append({
             "date": m.group("date"),
@@ -148,8 +159,12 @@ def extract_rhb(pdf_path):
         df = df[["date", "description", "debit", "credit", "balance"]]
         
         print(f"RHB extraction complete: {len(df)} transactions")
+        print(f"Sample balances: {df['balance'].head().tolist()}")
+        
         return df
     
     except Exception as e:
         print(f"Error extracting RHB statement from {pdf_path}: {e}")
+        import traceback
+        traceback.print_exc()
         return pd.DataFrame(columns=["date", "description", "debit", "credit", "balance"])
