@@ -2,11 +2,9 @@ import pdfplumber
 import pandas as pd
 import re
 
-# ===================================================
-# BANK RAKYAT — EXTRACTION ONLY
-# (DO NOT CHANGE LOGIC / REGEX)
-# ===================================================
-
+# ==========================
+# MAIN EXTRACTOR
+# ==========================
 def extract_bank_rakyat(pdf_path):
     txns = []
 
@@ -21,11 +19,13 @@ def extract_bank_rakyat(pdf_path):
 
     with pdfplumber.open(pdf_path) as pdf:
         for page in pdf.pages:
+
             table = page.extract_table()
             if not table or len(table) < 2:
                 continue
 
             for row in table[1:]:
+
                 # Normalize row safely
                 row = [(c or "").strip() for c in row]
 
@@ -34,7 +34,7 @@ def extract_bank_rakyat(pdf_path):
 
                 date, _, desc, debit, credit, balance = row[:6]
 
-                # ❌ Skip summaries / headers
+                # Skip summaries / headers
                 skip_words = [
                     "BAKI PERMULAAN",
                     "BAKI PENUTUP",
@@ -52,7 +52,7 @@ def extract_bank_rakyat(pdf_path):
                 desc = re.sub(r"\s+", " ", desc).strip()
 
                 txns.append({
-                    "date": date,                 # DD/MM/YYYY
+                    "date": date,
                     "description": desc,
                     "debit": to_float(debit),
                     "credit": to_float(credit),
@@ -64,4 +64,5 @@ def extract_bank_rakyat(pdf_path):
         columns=["date", "description", "debit", "credit", "balance"]
     )
 
+    print(f"✔ Bank Rakyat extracted {len(df)} rows from {pdf_path}")
     return df
