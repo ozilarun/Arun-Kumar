@@ -82,7 +82,7 @@ for f in uploaded_files:
     if not valid_dates.empty:
         period = valid_dates.iloc[0].to_period("M")
     else:
-  # ---------- FILENAME FALLBACK (ROBUST & SAFE) ----------
+# ---------- FILENAME FALLBACK (ROBUST & SAFE) ----------
 m_num = re.search(r"(20\d{2})[^\d]?([01]\d)", f.name)
 
 if m_num:
@@ -103,11 +103,14 @@ else:
         month_str = m_txt.group(1)[:3].title()
         y = re.search(r"(20\d{2})", f.name)
         year = y.group(1) if y else "2025"
-        period = pd.to_datetime(f"{month_str} {year}", format="%b %Y").to_period("M")
+        period = pd.to_datetime(
+            f"{month_str} {year}", format="%b %Y"
+        ).to_period("M")
 
     else:
         st.warning(f"⚠ Cannot infer month from filename: {f.name}")
         continue
+
 
 
 
