@@ -2,20 +2,20 @@ import pdfplumber
 import pytesseract
 from PIL import Image
 import regex as re
-import json
 import os
 import pandas as pd
 
-# ===============================
-# CONFIG & HELPERS
-# ===============================
+# ==========================
+# HELPERS
+# ==========================
+
 TEMP_DIR = "temp_ocr_images"
 os.makedirs(TEMP_DIR, exist_ok=True)
 
 def num(s):
     """
-    Helper to convert string to float (Handles commas and empty values).
-    Required because parse_transactions calls 'num(dr)'.
+    Converts string with commas to float. Returns 0.0 if empty/None.
+    (Required by parse_transactions)
     """
     if not s:
         return 0.0
@@ -57,9 +57,10 @@ def preprocess_rhb_text(text):
 
     return "\n".join(merged)
 
-# ===============================
-# REGEX PATTERN (EXACTLY AS PROVIDED)
-# ===============================
+# ==========================
+# REGEX PATTERN
+# ==========================
+
 txn_pattern = re.compile(
     r"""
     (?P<date>\d{2}-\d{2}-\d{4})     # Date
@@ -84,16 +85,17 @@ txn_pattern = re.compile(
     re.VERBOSE | re.DOTALL
 )
 
-# ===============================
+# ==========================
 # PARSING LOGIC
-# ===============================
+# ==========================
+
 def parse_transactions(text, page_num):
     text = preprocess_rhb_text(text)
     txns = []
 
     for m in txn_pattern.finditer(text):
-        
-        # SAFE extraction
+
+        # SAFE extraction (no IndexError anymore)
         body = m.group("body").strip() if m.group("body") else ""
 
         dr = m.group("dr")
@@ -115,26 +117,30 @@ def parse_transactions(text, page_num):
 
     return txns
 
-# ===============================
-# WRAPPER FOR APP.PY
-# ===============================
+# ==========================
+# MAIN EXTRACTOR (App Interface)
+# ==========================
+
 def extract_rhb(pdf_path):
-    """
-    Main entry point used by app.py
-    """
     all_txns = []
+
     try:
         with pdfplumber.open(pdf_path) as pdf:
-            for i, page in enumerate(pdf.pages):
-                # 1. Get Text
-                raw_text = extract_text(page, i+1)
+            for page_num, page in enumerate(pdf.pages, start=1):
                 
-                # 2. Parse using your logic
-                page_txns = parse_transactions(raw_text, i+1)
+                # 1. Extract Text (with OCR fallback)
+                raw = extract_text(page, page_num)
                 
-                all_txns.extend(page_txns)
+                # 2. Parse using your notebook logic
+                txns = parse_transactions(raw, page_num)
+
+                all_txns.extend(txns)
+                
     except Exception as e:
-        print(f"Error processing RHB: {e}")
+        print(f"Error processing {pdf_path}: {e}")
         return pd.DataFrame()
 
-    return pd.DataFrame(all_txns)
+    # Convert to DataFrame
+    df = pd.DataFrame(all_txns)
+    
+    return df
