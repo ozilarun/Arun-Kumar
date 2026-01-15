@@ -1,7 +1,7 @@
 # rhb.py
-# =========================================================
-# RHB BANK STATEMENT EXTRACTOR (STREAMLIT SAFE)
-# =========================================================
+# ==========================================================
+# RHB BANK STATEMENT EXTRACTOR (OCR-BASED – VERIFIED)
+# ==========================================================
 
 import pdfplumber
 import pytesseract
@@ -12,15 +12,24 @@ import tempfile
 import os
 
 
-# ---------------------------------------------------------
+# ----------------------------------------------------------
+# NUMBER CLEANER
+# ----------------------------------------------------------
+def num(x):
+    try:
+        return float(str(x).replace(",", "").replace("+", "").replace("-", ""))
+    except:
+        return 0.0
+
+
+# ----------------------------------------------------------
 # OCR FALLBACK
-# ---------------------------------------------------------
+# ----------------------------------------------------------
 def extract_text(page, page_num):
     text = page.extract_text()
     if text and text.strip():
         return text
 
-    # OCR fallback
     with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as img:
         page.to_image(resolution=300).save(img.name)
         ocr_text = pytesseract.image_to_string(Image.open(img.name))
@@ -28,17 +37,17 @@ def extract_text(page, page_num):
         return ocr_text
 
 
-# ---------------------------------------------------------
-# PREPROCESS TEXT (MERGE MULTI-LINE TXNS)
-# ---------------------------------------------------------
-def preprocess_lines(text):
+# ----------------------------------------------------------
+# PREPROCESS TEXT (MERGE MULTI-LINES)
+# ----------------------------------------------------------
+def preprocess_rhb_text(text):
     lines = text.split("\n")
     merged = []
     buffer = ""
 
     for line in lines:
         line = line.strip()
-        if re.match(r"^\d{1,2}\s+(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)", line, re.I):
+        if re.match(r"^\d{2}-\d{2}-\d{4}", line):
             if buffer:
                 merged.append(buffer.strip())
             buffer = line
@@ -48,98 +57,73 @@ def preprocess_lines(text):
     if buffer:
         merged.append(buffer.strip())
 
-    return merged
+    return "\n".join(merged)
 
 
-# ---------------------------------------------------------
-# TRANSACTION REGEX (OCR-TOLERANT)
-# ---------------------------------------------------------
+# ----------------------------------------------------------
+# TRANSACTION REGEX (THIS IS THE KEY)
+# ----------------------------------------------------------
 TX_PATTERN = re.compile(
     r"""
-    (?P<day>\d{1,2})\s+
-    (?P<month>JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)
-    .*?
-    (?P<amount>[0-9,]+\.\d{2})
+    (?P<date>\d{2}-\d{2}-\d{4})      # Date
     \s+
-    (?P<balance>-?[0-9,]+\.\d{2})
+    (?P<body>.*?)                   # Description
+    \s+
+    (?P<dr>[0-9,]*\.\d{2})?          # Debit (optional)
+    \s*
+    (?P<cr>[0-9,]*\.\d{2})?          # Credit (optional)
+    \s+
+    (?P<bal>-?[0-9,]*\.\d{2}[+-]?)   # Balance
     """,
-    re.IGNORECASE | re.VERBOSE
+    re.VERBOSE | re.DOTALL
 )
 
 
-# ---------------------------------------------------------
-# MAIN EXTRACTOR (REQUIRED BY app.py)
-# ---------------------------------------------------------
+# ----------------------------------------------------------
+# MAIN EXTRACTOR (USED BY app.py)
+# ----------------------------------------------------------
 def extract_rhb(pdf_path):
-    transactions = []
-    prev_balance = None
 
-    # Infer year from filename
-    year_match = re.search(r"(20\d{2})", pdf_path)
-    year = year_match.group(1) if year_match else "2025"
+    all_txns = []
 
     with pdfplumber.open(pdf_path) as pdf:
         for page_num, page in enumerate(pdf.pages, start=1):
+
             raw_text = extract_text(page, page_num)
             if not raw_text:
                 continue
 
-            lines = preprocess_lines(raw_text)
+            processed = preprocess_rhb_text(raw_text)
 
-            for line in lines:
-                m = TX_PATTERN.search(line)
-                if not m:
-                    continue
+            for m in TX_PATTERN.finditer(processed):
 
-                day = m.group("day")
-                month = m.group("month").title()
-                amount = float(m.group("amount").replace(",", ""))
-                balance = float(m.group("balance").replace(",", ""))
+                date = m.group("date")
+                desc = m.group("body").strip()
 
-                # Clean description
-                desc = re.sub(r"\s+", " ", line)
-                desc = re.sub(r"[0-9,]+\.\d{2}\s+-?[0-9,]+\.\d{2}", "", desc).strip()
+                debit = num(m.group("dr"))
+                credit = num(m.group("cr"))
+                balance = num(m.group("bal"))
 
-                debit = 0.0
-                credit = 0.0
-
-                # Balance math detection (PRIMARY)
-                if prev_balance is not None:
-                    if abs(prev_balance + amount - balance) < 1:
-                        credit = amount
-                    elif abs(prev_balance - amount - balance) < 1:
-                        debit = amount
-                    else:
-                        # Fallback keyword detection
-                        if any(k in desc.upper() for k in ["CR", "DEPOSIT", "INWARD", "HIBAH", "PROFIT"]):
-                            credit = amount
-                        else:
-                            debit = amount
-                else:
-                    debit = amount  # First row fallback
-
-                transactions.append({
-                    "date": f"{day} {month} {year}",
+                all_txns.append({
+                    "date": date,
                     "description": desc,
-                    "debit": round(debit, 2),
-                    "credit": round(credit, 2),
-                    "balance": round(balance, 2)
+                    "debit": debit,
+                    "credit": credit,
+                    "balance": balance
                 })
 
-                prev_balance = balance
-
-    # -----------------------------------------------------
-    # SAFETY: NEVER RETURN EMPTY SCHEMA
-    # -----------------------------------------------------
-    if not transactions:
+    # ------------------------------------------------------
+    # SAFETY RETURN
+    # ------------------------------------------------------
+    if not all_txns:
         return pd.DataFrame(
             columns=["date", "description", "debit", "credit", "balance"]
         )
 
-    df = pd.DataFrame(transactions)
+    df = pd.DataFrame(all_txns)
 
-    # Sort by date
-    df["_dt"] = pd.to_datetime(df["date"], format="%d %b %Y", errors="coerce")
+    # Convert date
+    df["_dt"] = pd.to_datetime(df["date"], format="%d-%m-%Y", errors="coerce")
     df = df.sort_values("_dt").drop(columns="_dt").reset_index(drop=True)
 
     return df
